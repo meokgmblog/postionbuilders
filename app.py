@@ -16,7 +16,7 @@ SPOT_KEY = "NSE_INDEX|Nifty 50"
 # 1. UPSTOX LIVE API + RESAMPLING
 # ==========================================
 def fetch_raw_1min_ohlc(instrument_key):
-    """Fetches valid 1minute candles directly from Upstox API."""
+    """Fetches valid 1minute candles directly from Upstox API with clean timezone handling."""
     url = f"https://api.upstox.com/v2/historical-candle/intraday/{instrument_key}/1minute"
     headers = {
         "Accept": "application/json",
@@ -42,8 +42,13 @@ def fetch_raw_1min_ohlc(instrument_key):
                     "oi",
                 ],
             )
-            df["timestamp"] = pd.to_datetime(df["timestamp"])
-            df = df[df["timestamp"] <= pd.Timestamp.now()]
+            # Parse datetime and remove timezone offset (make naive)
+            df["timestamp"] = pd.to_datetime(df["timestamp"]).dt.tz_localize(None)
+
+            # Filter out any timestamp strictly past current local execution time
+            now = datetime.now()
+            df = df[df["timestamp"] <= now]
+            
             return df.sort_values("timestamp").reset_index(drop=True)
         else:
             st.error(f"API Request Failed [{res.status_code}]: {res.text}")
