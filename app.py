@@ -117,7 +117,7 @@ def fetch_strike_oi_parallel(keys, timeframe):
         if not df_1m.empty:
             df_res = resample_candles(df_1m, timeframe)
 
-            # Calculate 09:15 AM candle delta against open OI
+            # Fix 1: Calculate 09:15 AM candle delta against open OI instead of returning 0
             df_res["oi_diff"] = df_res["oi"].diff().fillna(df_res["oi"])
             return df_res[["timestamp", "oi_diff"]]
         return pd.DataFrame()
@@ -156,7 +156,7 @@ def build_options_apex_dataset(timeframe, num_strikes, selected_expiry):
 
     chain = sorted(chain, key=lambda x: x.get("strike_price", 0))
 
-    # Multi-strike selection relative to spot price median
+    # Fix 2: Multi-strike selection relative to spot price median
     spot_price = df_spot["close"].median()
 
     closest_idx = min(
@@ -257,7 +257,6 @@ def render_live_chart(tf, count, expiry):
             row_heights=[0.72, 0.28],
         )
 
-        # Candlestick chart: hoverinfo set to 'none' for clean hover, active on press/click
         fig.add_trace(
             go.Candlestick(
                 x=df["timestamp"],
@@ -270,7 +269,6 @@ def render_live_chart(tf, count, expiry):
                 decreasing_line_color="#ef4444",
                 increasing_fillcolor="#10b981",
                 decreasing_fillcolor="#ef4444",
-                hoverinfo="none",
             ),
             row=1,
             col=1,
@@ -283,7 +281,6 @@ def render_live_chart(tf, count, expiry):
                 marker_color=df["color"],
                 name="Position Builder",
                 showlegend=False,
-                hoverinfo="none",
             ),
             row=2,
             col=1,
@@ -296,9 +293,8 @@ def render_live_chart(tf, count, expiry):
             margin=dict(l=10, r=40, t=10, b=10),
             height=650,
             xaxis_rangeslider_visible=False,
-            hovermode=False,
+            hovermode="x unified",
             showlegend=False,
-            dragmode="zoom",
         )
 
         fig.update_xaxes(
@@ -307,7 +303,6 @@ def render_live_chart(tf, count, expiry):
             color="#9ca3af",
             tickformat="%H:%M",
             type="date",
-            fixedrange=False,
             row=2,
             col=1,
         )
@@ -317,7 +312,6 @@ def render_live_chart(tf, count, expiry):
             gridcolor="#1f2937",
             color="#9ca3af",
             side="right",
-            fixedrange=False,
             row=1,
             col=1,
         )
@@ -327,23 +321,11 @@ def render_live_chart(tf, count, expiry):
             side="right",
             zeroline=True,
             zerolinecolor="#374151",
-            fixedrange=False,
             row=2,
             col=1,
         )
 
-        # Plotly configuration for TradingView-style smooth scroll zooming
-        chart_config = {
-            "scrollZoom": True,
-            "displayModeBar": True,
-            "displaylogo": False,
-            "modeBarButtonsToRemove": ["lasso2d", "select2d"],
-            "doubleClick": "reset",
-        }
-
-        st.plotly_chart(
-            fig, use_container_width=True, config=chart_config
-        )
+        st.plotly_chart(fig, use_container_width=True)
     else:
         st.error("Unable to load session data.")
 
