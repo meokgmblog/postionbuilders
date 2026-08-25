@@ -314,7 +314,7 @@ with hdr_col4:
 
 
 # ==========================================
-# 3. CHART RENDER ENGINE
+# 3. CHART RENDER ENGINE (TradingView Style Crosshair)
 # ==========================================
 @st.fragment(run_every="180s")
 def render_live_chart(tf, count, expiry):
@@ -325,11 +325,11 @@ def render_live_chart(tf, count, expiry):
             rows=2,
             cols=1,
             shared_xaxes=True,
-            vertical_spacing=0.015,
-            row_heights=[0.74, 0.26],
+            vertical_spacing=0.0,  # Zero spacing so crosshair line is continuous
+            row_heights=[0.75, 0.25],
         )
 
-        # Main Candlestick Chart (OHLC box hidden; only time displayed)
+        # 1. Main Candlestick Chart
         fig.add_trace(
             go.Candlestick(
                 x=df["timestamp"],
@@ -342,13 +342,13 @@ def render_live_chart(tf, count, expiry):
                 decreasing_line_color="#f23645",
                 increasing_fillcolor="#089981",
                 decreasing_fillcolor="#f23645",
-                hovertemplate="%{x|%I:%M %p}<extra></extra>",  # Displays ONLY time
+                hoverinfo="none",  # Suppresses all mid-screen hover popups
             ),
             row=1,
             col=1,
         )
 
-        # Lower Position Builder Histogram
+        # 2. Lower Position Builder Histogram
         fig.add_trace(
             go.Bar(
                 x=df["timestamp"],
@@ -357,36 +357,23 @@ def render_live_chart(tf, count, expiry):
                 marker_line_width=0,
                 name="",
                 opacity=0.85,
-                hovertemplate="%{x|%I:%M %p}<extra></extra>",  # Displays ONLY time
+                hoverinfo="none",  # Suppresses lower trace hover popups
             ),
             row=2,
             col=1,
         )
 
-        # Layout Config
-        fig.update_layout(
-            template="plotly_dark",
-            paper_bgcolor="#0b0e14",
-            plot_bgcolor="#0b0e14",
-            margin=dict(l=15, r=55, t=10, b=30),
-            height=580,
-            dragmode="pan",
-            xaxis_rangeslider_visible=False,
-            hovermode="x",  # Standard unified crosshair cursor hover mode
-            showlegend=False,
-        )
-
-        # Single Continuous Merged Crosshair Config (Top to Bottom)
+        # Unified Spike Crosshair Settings
         spike_config = dict(
             showspikes=True,
-            spikemode="across",
-            spikecolor="#787b86",
+            spikemode="across+toaxis",
+            spikecolor="#8a8a8a",
             spikethickness=1,
             spikedash="dash",
             spikesnap="cursor",
         )
 
-        # Upper X-Axis
+        # 3. Configure Upper Row (Price)
         fig.update_xaxes(
             showgrid=True,
             gridcolor="#1e222d",
@@ -397,7 +384,6 @@ def render_live_chart(tf, count, expiry):
             **spike_config,
         )
 
-        # Upper Y-Axis (Price)
         fig.update_yaxes(
             showgrid=True,
             gridcolor="#1e222d",
@@ -410,12 +396,12 @@ def render_live_chart(tf, count, expiry):
             **spike_config,
         )
 
-        # Lower X-Axis
+        # 4. Configure Lower Row (Time Axis with Dark Pill Callout)
         fig.update_xaxes(
             showgrid=True,
             gridcolor="#1e222d",
             color="#787b86",
-            tickformat="%I:%M %p",
+            tickformat="%H:%M",  # 24hr format or '%a %d %b \'%y  %H:%M' for full date
             type="date",
             rangebreaks=[dict(bounds=["sat", "mon"])],
             row=2,
@@ -423,7 +409,6 @@ def render_live_chart(tf, count, expiry):
             **spike_config,
         )
 
-        # Lower Y-Axis Scale
         if len(df) > 2:
             scaled_max = df["pos_builder"].abs().quantile(0.98)
             if scaled_max > 0:
@@ -443,6 +428,19 @@ def render_live_chart(tf, count, expiry):
             row=2,
             col=1,
             **spike_config,
+        )
+
+        # Figure Layout & Hover Mode Configuration
+        fig.update_layout(
+            template="plotly_dark",
+            paper_bgcolor="#0b0e14",
+            plot_bgcolor="#0b0e14",
+            margin=dict(l=15, r=55, t=10, b=30),
+            height=580,
+            dragmode="pan",
+            xaxis_rangeslider_visible=False,
+            hovermode="x",
+            showlegend=False,
         )
 
         st.plotly_chart(
