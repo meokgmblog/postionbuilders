@@ -415,7 +415,7 @@ def render_live_chart(tf, count, expiry):
             paper_bgcolor="#131722",
             plot_bgcolor="#131722",
             margin=dict(l=10, r=60, t=10, b=25),
-            height=410,
+            height=510,
             dragmode="pan",
             xaxis_rangeslider_visible=False,
             hovermode="x unified",
