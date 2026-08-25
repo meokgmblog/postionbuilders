@@ -13,10 +13,10 @@ SPOT_KEY = "NSE_INDEX|Nifty 50"
 
 
 # ==========================================
-# 1. UPSTOX FULL INTRADAY FETCH ENGINE
+# 1. UPSTOX API CORE ENGINE
 # ==========================================
-def fetch_full_intraday_candles(instrument_key):
-    """Fetches all 1-minute intraday candles for today from Upstox API."""
+def fetch_raw_1min_candles(instrument_key):
+    """Fetches full 1-minute intraday candles from Upstox API."""
     url = f"https://api.upstox.com/v2/historical-candle/intraday/{instrument_key}/1minute"
     headers = {
         "Accept": "application/json",
@@ -42,34 +42,27 @@ def fetch_full_intraday_candles(instrument_key):
                     "oi",
                 ],
             )
-            # Remove timezone offset to make naive IST
             df["timestamp"] = pd.to_datetime(df["timestamp"]).dt.tz_localize(
                 None
             )
-
-            # Sort ascending (09:15 AM -> Current Time)
             df = df.sort_values("timestamp").reset_index(drop=True)
-
-            # Cap strictly at current system time
-            df = df[df["timestamp"] <= datetime.now()]
-            return df
+            return df[df["timestamp"] <= datetime.now()]
     except Exception:
         pass
 
     return pd.DataFrame()
 
 
-def resample_ohlc(df, timeframe="3min"):
-    """Resamples 1m candles accurately into target buckets (3min / 5min)."""
+def resample_candles(df, timeframe="3min"):
+    """Resamples 1m data to target timeframe while preserving 09:15 boundaries."""
     if df.empty:
         return pd.DataFrame()
 
-    # Map timeframe labels
     tf = "3min" if timeframe in ["3min", "3minute"] else "5min"
 
     df_res = (
         df.set_index("timestamp")
-        .resample(tf, origin="start_day")
+        .resample(tf, origin="start_day", closed="left", label="left")
         .agg(
             {
                 "open": "first",
@@ -84,6 +77,26 @@ def resample_ohlc(df, timeframe="3min"):
         .reset_index()
     )
     return df_res
+
+
+def get_expiry_dates(spot_key):
+    """Retrieves all valid active expiry dates from Upstox."""
+    url = f"https://api.upstox.com/v2/option/chain?instrument_key={spot_key}"
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {UPSTOX_TOKEN}",
+    }
+    try:
+        res = requests.get(url, headers=headers, timeout=6)
+        if res.status_code == 200:
+            data = res.json().get("data", [])
+            expiries = sorted(
+                list({item["expiry"] for item in data if "expiry" in item})
+            )
+            return expiries
+    except Exception:
+        pass
+    return [datetime.now().strftime("%Y-%m-%d")]
 
 
 def fetch_option_chain(spot_key, expiry_date):
@@ -103,12 +116,10 @@ def fetch_option_chain(spot_key, expiry_date):
 
 
 def fetch_strike_oi_parallel(keys, timeframe):
-    """Fetches full intraday option candles in parallel."""
-
     def worker(key):
-        df_1m = fetch_full_intraday_candles(key)
+        df_1m = fetch_raw_1min_candles(key)
         if not df_1m.empty:
-            df_res = resample_ohlc(df_1m, timeframe)
+            df_res = resample_candles(df_1m, timeframe)
             df_res["oi_diff"] = df_res["oi"].diff().fillna(0)
             return df_res[["timestamp", "oi_diff"]]
         return pd.DataFrame()
@@ -122,7 +133,6 @@ def fetch_strike_oi_parallel(keys, timeframe):
                 results.append(res)
 
     if results:
-        # Sum total delta OI across all fetched strikes per candle timestamp
         return (
             pd.concat(results)
             .groupby("timestamp", as_index=False)["oi_diff"]
@@ -131,18 +141,17 @@ def fetch_strike_oi_parallel(keys, timeframe):
     return pd.DataFrame()
 
 
-def build_options_apex_dataset(timeframe, num_strikes, expiry_date):
-    # Fetch Base Spot Index Candles
-    df_spot_1m = fetch_full_intraday_candles(SPOT_KEY)
+def build_options_apex_dataset(timeframe, num_strikes, selected_expiry):
+    df_spot_1m = fetch_raw_1min_candles(SPOT_KEY)
     if df_spot_1m.empty:
         return pd.DataFrame()
 
-    df_spot = resample_ohlc(df_spot_1m, timeframe)
+    df_spot = resample_candles(df_spot_1m, timeframe)
 
-    chain = fetch_option_chain(SPOT_KEY, expiry_date)
+    chain = fetch_option_chain(SPOT_KEY, selected_expiry)
     if not chain:
-        # Fallback to Price Momentum if Option Chain fails
-        df_spot["pos_builder"] = (df_spot["close"] - df_spot["open"]) * 100
+        # Fallback if expiry option chain fails: price action delta
+        df_spot["pos_builder"] = (df_spot["close"] - df_spot["open"]) * 10
         df_spot["color"] = df_spot["pos_builder"].apply(
             lambda x: "#10b981" if x >= 0 else "#ef4444"
         )
@@ -174,14 +183,7 @@ def build_options_apex_dataset(timeframe, num_strikes, expiry_date):
     df_calls = fetch_strike_oi_parallel(call_keys, timeframe)
     df_puts = fetch_strike_oi_parallel(put_keys, timeframe)
 
-    if df_calls.empty or df_puts.empty:
-        df_spot["pos_builder"] = (df_spot["close"] - df_spot["open"]) * 100
-        df_spot["color"] = df_spot["pos_builder"].apply(
-            lambda x: "#10b981" if x >= 0 else "#ef4444"
-        )
-        return df_spot
-
-    # OUTER MERGE WITH FFILL PREVENTS DROPPING CANDLES WHEN AN OPTION STRIKE MISSES A TIMESTAMPS
+    # Left Merge ensures Spot timestamps are never dropped
     merged = pd.merge(
         df_spot,
         df_calls.rename(columns={"oi_diff": "call_oi_diff"}),
@@ -198,8 +200,13 @@ def build_options_apex_dataset(timeframe, num_strikes, expiry_date):
     merged["call_oi_diff"] = merged["call_oi_diff"].fillna(0)
     merged["put_oi_diff"] = merged["put_oi_diff"].fillna(0)
 
-    # Calculate Position Builder: Net ΔOI Put - Net ΔOI Call
+    # Position Builder = Put ΔOI - Call ΔOI
     merged["pos_builder"] = merged["put_oi_diff"] - merged["call_oi_diff"]
+
+    # If option data was entirely 0, fallback to candle momentum for visible histogram
+    if (merged["pos_builder"] == 0).all():
+        merged["pos_builder"] = (merged["close"] - merged["open"]) * 100
+
     merged["color"] = merged["pos_builder"].apply(
         lambda x: "#10b981" if x >= 0 else "#ef4444"
     )
@@ -208,7 +215,7 @@ def build_options_apex_dataset(timeframe, num_strikes, expiry_date):
 
 
 # ==========================================
-# 2. STREAMLIT INTERFACE
+# 2. UI LAYOUT
 # ==========================================
 col_title, col_tf, col_strikes, col_exp = st.columns([4, 2, 2, 2])
 
@@ -232,29 +239,29 @@ with col_strikes:
     )
 
 with col_exp:
-    expiry_input = st.date_input(
-        "Expiry",
-        value=datetime.now(),
+    available_expiries = get_expiry_dates(SPOT_KEY)
+    expiry_input = st.selectbox(
+        "Expiry Date",
+        options=available_expiries,
+        index=0,
         label_visibility="collapsed",
     )
 
-df = build_options_apex_dataset(
-    tf_option, strike_count, expiry_input.strftime("%Y-%m-%d")
-)
+df = build_options_apex_dataset(tf_option, strike_count, expiry_input)
 
 # ==========================================
-# 3. PLOTLY CHART CANVAS
+# 3. GRAPH ENGINE
 # ==========================================
 if not df.empty:
     fig = make_subplots(
         rows=2,
         cols=1,
         shared_xaxes=True,
-        vertical_spacing=0.02,
-        row_heights=[0.75, 0.25],
+        vertical_spacing=0.03,
+        row_heights=[0.7, 0.3],
     )
 
-    # Spot Candlesticks
+    # Nifty Spot Candlestick
     fig.add_trace(
         go.Candlestick(
             x=df["timestamp"],
@@ -262,7 +269,7 @@ if not df.empty:
             high=df["high"],
             low=df["low"],
             close=df["close"],
-            name="Nifty 50",
+            name="Nifty 50 Spot",
             increasing_line_color="#10b981",
             decreasing_line_color="#ef4444",
             increasing_fillcolor="#10b981",
@@ -272,7 +279,7 @@ if not df.empty:
         col=1,
     )
 
-    # Position Builder Histogram
+    # Multi-Strike Position Builder Histogram
     fig.add_trace(
         go.Bar(
             x=df["timestamp"],
@@ -296,12 +303,13 @@ if not df.empty:
         showlegend=False,
     )
 
-    # Render complete range from 09:15 AM to current timestamp
+    # Force continuous X-axis across current session
     fig.update_xaxes(
         showgrid=True,
         gridcolor="#1f2937",
         color="#9ca3af",
         tickformat="%H:%M",
+        type="date",
         range=[
             df["timestamp"].min() - pd.Timedelta(minutes=5),
             df["timestamp"].max() + pd.Timedelta(minutes=5),
@@ -330,4 +338,6 @@ if not df.empty:
 
     st.plotly_chart(fig, use_container_width=True)
 else:
-    st.error("Could not fetch live session data. Check Upstox Access Token.")
+    st.error(
+        "Unable to load session data. Please verify your Upstox access token status."
+    )
