@@ -8,12 +8,12 @@ import streamlit as st
 
 st.set_page_config(layout="wide", page_title="Live Nifty 50 Multi-Strike Apex")
 
-UPSTOX_TOKEN = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2M0FZSEUiLCJqdGkiOiI2YThkNTc1Y2Y4MTJmNjA0MzcxZDNlM2MiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc4NzY0NzgzNiwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzg3Njk1MjAwfQ.Z4zP9w3MecFeZEcX5sUt4YdhxS6skp25fbKOv8-_gPU"
+UPSTOX_TOKEN = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2M0FZSEUiLCJqdGkiOiI2YThkNTc1Y2Y4MTJmZmA0MzcxZDNlM2MiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc4NzY0NzgzNiwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzg3Njk1MjAwfQ.Z4zP9w3MecFeZEcX5sUt4YdhxS6skp25fbKOv8-_gPU"
 SPOT_KEY = "NSE_INDEX|Nifty 50"
 
 
 # ==========================================
-# 1. DATA ENGINE (FIXED FIRST BAR DELTA)
+# 1. UPSTOX API DATA ENGINE
 # ==========================================
 def fetch_raw_1min_candles(instrument_key):
     url = f"https://api.upstox.com/v2/historical-candle/intraday/{instrument_key}/1minute"
@@ -117,9 +117,13 @@ def fetch_strike_oi_parallel(keys, timeframe):
         if not df_1m.empty:
             df_res = resample_candles(df_1m, timeframe)
 
-            # Fix: Ensure the 09:15 AM candle gets calculated relative to opening OI baseline
-            first_oi = df_res["oi"].iloc[0] if len(df_res) > 0 else 0
-            df_res["oi_diff"] = df_res["oi"].diff().fillna(df_res["oi"] - first_oi)
+            # Fix 1: Calculate OI delta properly including 09:15 AM opening candle
+            df_res["oi_diff"] = df_res["oi"] - df_res["oi"].shift(1)
+            # If the first bar shift is NaN, use difference from the candle's own open OI
+            df_res["oi_diff"] = df_res["oi_diff"].fillna(
+                df_1m["oi"].iloc[-1] - df_1m["oi"].iloc[0]
+            )
+
             return df_res[["timestamp", "oi_diff"]]
         return pd.DataFrame()
 
@@ -156,11 +160,13 @@ def build_options_apex_dataset(timeframe, num_strikes, selected_expiry):
         return df_spot
 
     chain = sorted(chain, key=lambda x: x.get("strike_price", 0))
-    spot_price = df_spot["close"].iloc[-1]
+
+    # Fix 2: Anchor strike selection to Day Open spot price so strikes do not drift
+    open_spot_price = df_spot["open"].iloc[0]
 
     closest_idx = min(
         range(len(chain)),
-        key=lambda i: abs(chain[i]["strike_price"] - spot_price),
+        key=lambda i: abs(chain[i]["strike_price"] - open_spot_price),
     )
 
     start_i = max(0, closest_idx - num_strikes)
@@ -197,7 +203,7 @@ def build_options_apex_dataset(timeframe, num_strikes, selected_expiry):
     merged["call_oi_diff"] = merged["call_oi_diff"].fillna(0)
     merged["put_oi_diff"] = merged["put_oi_diff"].fillna(0)
 
-    # Position Builder: Put ΔOI - Call ΔOI
+    # Position Builder formula: Put ΔOI - Call ΔOI
     merged["pos_builder"] = merged["put_oi_diff"] - merged["call_oi_diff"]
     merged["color"] = merged["pos_builder"].apply(
         lambda x: "#10b981" if x >= 0 else "#ef4444"
@@ -207,7 +213,7 @@ def build_options_apex_dataset(timeframe, num_strikes, selected_expiry):
 
 
 # ==========================================
-# 2. HEADER UI CONTROLS
+# 2. UI CONTROLS
 # ==========================================
 col_title, col_tf, col_strikes, col_exp = st.columns([4, 2, 2, 2])
 
@@ -241,7 +247,7 @@ with col_exp:
 
 
 # ==========================================
-# 3. AUTOMATIC REFRESH FRAGMENT (EVERY 3 MIN)
+# 3. REFRESH FRAGMENT & PLOTLY CHART
 # ==========================================
 @st.fragment(run_every="180s")
 def render_live_chart(tf, count, expiry):
@@ -329,5 +335,4 @@ def render_live_chart(tf, count, expiry):
         st.error("Unable to load session data.")
 
 
-# Execute live update wrapper
 render_live_chart(tf_option, strike_count, expiry_input)
