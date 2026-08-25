@@ -116,8 +116,6 @@ def fetch_strike_oi_parallel(keys, timeframe):
         df_1m = fetch_raw_1min_candles(key)
         if not df_1m.empty:
             df_res = resample_candles(df_1m, timeframe)
-
-            # Fix 1: Calculate 09:15 AM candle delta against open OI instead of returning 0
             df_res["oi_diff"] = df_res["oi"].diff().fillna(df_res["oi"])
             return df_res[["timestamp", "oi_diff"]]
         return pd.DataFrame()
@@ -156,7 +154,6 @@ def build_options_apex_dataset(timeframe, num_strikes, selected_expiry):
 
     chain = sorted(chain, key=lambda x: x.get("strike_price", 0))
 
-    # Fix 2: Multi-strike selection relative to spot price median
     spot_price = df_spot["close"].median()
 
     closest_idx = min(
@@ -198,7 +195,6 @@ def build_options_apex_dataset(timeframe, num_strikes, selected_expiry):
     merged["call_oi_diff"] = merged["call_oi_diff"].fillna(0)
     merged["put_oi_diff"] = merged["put_oi_diff"].fillna(0)
 
-    # Position Builder Formula: Put ΔOI - Call ΔOI
     merged["pos_builder"] = merged["put_oi_diff"] - merged["call_oi_diff"]
     merged["color"] = merged["pos_builder"].apply(
         lambda x: "#10b981" if x >= 0 else "#ef4444"
@@ -269,6 +265,7 @@ def render_live_chart(tf, count, expiry):
                 decreasing_line_color="#ef4444",
                 increasing_fillcolor="#10b981",
                 decreasing_fillcolor="#ef4444",
+                hoverinfo="none",
             ),
             row=1,
             col=1,
@@ -281,6 +278,7 @@ def render_live_chart(tf, count, expiry):
                 marker_color=df["color"],
                 name="Position Builder",
                 showlegend=False,
+                hoverinfo="none",
             ),
             row=2,
             col=1,
@@ -293,17 +291,35 @@ def render_live_chart(tf, count, expiry):
             margin=dict(l=10, r=40, t=10, b=10),
             height=650,
             xaxis_rangeslider_visible=False,
-            hovermode="x unified",
+            hovermode=False,
             showlegend=False,
         )
 
+        # Crosshair Spike Lines and Time Label Settings
         fig.update_xaxes(
             showgrid=True,
             gridcolor="#1f2937",
             color="#9ca3af",
             tickformat="%H:%M",
             type="date",
+            showspikes=True,
+            spikemode="across",
+            spikesnap="cursor",
+            spikethickness=1,
+            spikecolor="#9ca3af",
+            spikedash="dash",
             row=2,
+            col=1,
+        )
+
+        fig.update_xaxes(
+            showspikes=True,
+            spikemode="across",
+            spikesnap="cursor",
+            spikethickness=1,
+            spikecolor="#9ca3af",
+            spikedash="dash",
+            row=1,
             col=1,
         )
 
@@ -312,6 +328,12 @@ def render_live_chart(tf, count, expiry):
             gridcolor="#1f2937",
             color="#9ca3af",
             side="right",
+            showspikes=True,
+            spikemode="across",
+            spikesnap="cursor",
+            spikethickness=1,
+            spikecolor="#9ca3af",
+            spikedash="dash",
             row=1,
             col=1,
         )
@@ -321,11 +343,22 @@ def render_live_chart(tf, count, expiry):
             side="right",
             zeroline=True,
             zerolinecolor="#374151",
+            showspikes=True,
+            spikemode="across",
+            spikesnap="cursor",
+            spikethickness=1,
+            spikecolor="#9ca3af",
+            spikedash="dash",
             row=2,
             col=1,
         )
 
-        st.plotly_chart(fig, use_container_width=True)
+        # Enables TradingView-style Scroll Zoom
+        st.plotly_chart(
+            fig,
+            use_container_width=True,
+            config={"scrollZoom": True, "displayModeBar": False},
+        )
     else:
         st.error("Unable to load session data.")
 
