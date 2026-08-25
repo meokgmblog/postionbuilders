@@ -374,7 +374,7 @@ def render_live_chart(tf, count, expiry):
             cols=1,
             shared_xaxes=True,
             vertical_spacing=0.02,
-            row_heights=[0.68, 0.52],
+            row_heights=[0.98, 0.52],
         )
 
         # Candlestick
