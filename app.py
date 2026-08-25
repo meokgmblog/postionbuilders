@@ -8,17 +8,16 @@ import streamlit as st
 
 st.set_page_config(layout="wide", page_title="Live Options Apex - Multi-Strike")
 
-# User Token
 UPSTOX_TOKEN = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2M0FZSEUiLCJqdGkiOiI2YThkNTc1Y2Y4MTJmNjA0MzcxZDNlM2MiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc4NzY0NzgzNiwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzg3Njk1MjAwfQ.Z4zP9w3MecFeZEcX5sUt4YdhxS6skp25fbKOv8-_gPU"
 SPOT_KEY = "NSE_INDEX|Nifty 50"
 
 
 # ==========================================
-# 1. UPSTOX LIVE API INTEGRATION
+# 1. UPSTOX LIVE API + RESAMPLING
 # ==========================================
-def fetch_upstox_intraday_ohlc(instrument_key, interval="3minute"):
-    """Fetches real intraday candle data strictly up to current timestamp."""
-    url = f"https://api.upstox.com/v2/historical-candle/intraday/{instrument_key}/{interval}"
+def fetch_raw_1min_ohlc(instrument_key):
+    """Fetches valid 1minute candles directly from Upstox API."""
+    url = f"https://api.upstox.com/v2/historical-candle/intraday/{instrument_key}/1minute"
     headers = {
         "Accept": "application/json",
         "Authorization": f"Bearer {UPSTOX_TOKEN}",
@@ -44,8 +43,6 @@ def fetch_upstox_intraday_ohlc(instrument_key, interval="3minute"):
                 ],
             )
             df["timestamp"] = pd.to_datetime(df["timestamp"])
-
-            # Strict filter up to current system time (No future candles)
             df = df[df["timestamp"] <= pd.Timestamp.now()]
             return df.sort_values("timestamp").reset_index(drop=True)
         else:
@@ -56,8 +53,31 @@ def fetch_upstox_intraday_ohlc(instrument_key, interval="3minute"):
     return pd.DataFrame()
 
 
+def resample_ohlc(df, timeframe="3min"):
+    """Resamples 1minute data to target timeframe (3min or 5min) accurately."""
+    if df.empty:
+        return pd.DataFrame()
+
+    df_res = (
+        df.set_index("timestamp")
+        .resample(timeframe, origin="start_day")
+        .agg(
+            {
+                "open": "first",
+                "high": "max",
+                "low": "min",
+                "close": "last",
+                "vol": "sum",
+                "oi": "last",
+            }
+        )
+        .dropna()
+        .reset_index()
+    )
+    return df_res
+
+
 def fetch_option_chain(spot_key, expiry_date):
-    """Fetches Option Chain to identify current ATM and nearby Option Keys."""
     url = f"https://api.upstox.com/v2/option/chain?instrument_key={spot_key}&expiry_date={expiry_date}"
     headers = {
         "Accept": "application/json",
@@ -73,14 +93,15 @@ def fetch_option_chain(spot_key, expiry_date):
     return []
 
 
-def fetch_strike_oi_parallel(keys, interval):
-    """Fetches OI changes concurrently across multiple strike keys."""
+def fetch_strike_oi_parallel(keys, timeframe):
+    """Fetches 1min candles in parallel and aggregates OI change per timeframe."""
 
     def worker(key):
-        df = fetch_upstox_intraday_ohlc(key, interval)
-        if not df.empty:
-            df["oi_diff"] = df["oi"].diff().fillna(0)
-            return df[["timestamp", "oi_diff"]]
+        df_1m = fetch_raw_1min_ohlc(key)
+        if not df_1m.empty:
+            df_res = resample_ohlc(df_1m, timeframe)
+            df_res["oi_diff"] = df_res["oi"].diff().fillna(0)
+            return df_res[["timestamp", "oi_diff"]]
         return pd.DataFrame()
 
     results = []
@@ -98,20 +119,15 @@ def fetch_strike_oi_parallel(keys, interval):
     return pd.DataFrame()
 
 
-def build_options_apex_dataset(interval, num_strikes, expiry_date):
-    # Fetch Nifty Spot Candles
-    df_spot = fetch_upstox_intraday_ohlc(SPOT_KEY, interval)
-
-    if df_spot.empty:
-        st.warning(
-            "Could not fetch Nifty 50 Spot data. Verify token status or market hours."
-        )
+def build_options_apex_dataset(timeframe, num_strikes, expiry_date):
+    df_spot_1m = fetch_raw_1min_ohlc(SPOT_KEY)
+    if df_spot_1m.empty:
         return pd.DataFrame()
 
-    # Get Option chain to isolate strikes around ATM
+    df_spot = resample_ohlc(df_spot_1m, timeframe)
+
     chain = fetch_option_chain(SPOT_KEY, expiry_date)
     if not chain:
-        # Fallback: Render Nifty spot candles with Price Momentum if chain expiry date is invalid
         df_spot["pos_builder"] = (df_spot["close"] - df_spot["open"]) * 100
         df_spot["color"] = df_spot["pos_builder"].apply(
             lambda x: "#10b981" if x >= 0 else "#ef4444"
@@ -141,8 +157,8 @@ def build_options_apex_dataset(interval, num_strikes, expiry_date):
         if "put_options" in item
     ]
 
-    df_calls = fetch_strike_oi_parallel(call_keys, interval)
-    df_puts = fetch_strike_oi_parallel(put_keys, interval)
+    df_calls = fetch_strike_oi_parallel(call_keys, timeframe)
+    df_puts = fetch_strike_oi_parallel(put_keys, timeframe)
 
     if df_calls.empty or df_puts.empty:
         df_spot["pos_builder"] = (df_spot["close"] - df_spot["open"]) * 100
@@ -151,9 +167,19 @@ def build_options_apex_dataset(interval, num_strikes, expiry_date):
         )
         return df_spot
 
-    # Consolidate Net Multi-Strike Position Builder: Put Delta OI - Call Delta OI
-    merged = pd.merge(df_spot, df_calls.rename(columns={"oi_diff": "call_oi_diff"}), on="timestamp", how="inner")
-    merged = pd.merge(merged, df_puts.rename(columns={"oi_diff": "put_oi_diff"}), on="timestamp", how="inner")
+    # Calculate Position Builder: Put ΔOI - Call ΔOI
+    merged = pd.merge(
+        df_spot,
+        df_calls.rename(columns={"oi_diff": "call_oi_diff"}),
+        on="timestamp",
+        how="inner",
+    )
+    merged = pd.merge(
+        merged,
+        df_puts.rename(columns={"oi_diff": "put_oi_diff"}),
+        on="timestamp",
+        how="inner",
+    )
 
     merged["pos_builder"] = merged["put_oi_diff"] - merged["call_oi_diff"]
     merged["color"] = merged["pos_builder"].apply(
@@ -164,7 +190,7 @@ def build_options_apex_dataset(interval, num_strikes, expiry_date):
 
 
 # ==========================================
-# 2. STREAMLIT INTERFACE
+# 2. STREAMLIT UI
 # ==========================================
 col_title, col_tf, col_strikes, col_exp = st.columns([4, 2, 2, 2])
 
@@ -174,7 +200,7 @@ with col_title:
 with col_tf:
     tf_option = st.selectbox(
         "Timeframe",
-        options=["3minute", "5minute", "1minute"],
+        options=["3min", "5min", "1min"],
         index=0,
         label_visibility="collapsed",
     )
@@ -194,13 +220,12 @@ with col_exp:
         label_visibility="collapsed",
     )
 
-# Fetch Data
 df = build_options_apex_dataset(
     tf_option, strike_count, expiry_input.strftime("%Y-%m-%d")
 )
 
 # ==========================================
-# 3. PLOTLY CHART ENGINE
+# 3. PLOTLY CHART CANVAS
 # ==========================================
 if not df.empty:
     fig = make_subplots(
@@ -229,13 +254,13 @@ if not df.empty:
         col=1,
     )
 
-    # Multi-Strike Net OI Change (Position Builder)
+    # Multi-Strike Position Builder (Put ΔOI - Call ΔOI)
     fig.add_trace(
         go.Bar(
             x=df["timestamp"],
             y=df["pos_builder"],
             marker_color=df["color"],
-            name="Position Builder (Put ΔOI - Call ΔOI)",
+            name="Position Builder",
             showlegend=False,
         ),
         row=2,
