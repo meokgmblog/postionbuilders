@@ -13,7 +13,7 @@ SPOT_KEY = "NSE_INDEX|Nifty 50"
 
 
 # ==========================================
-# 1. DATA ENGINE (FIXED FIRST BAR DELTA)
+# 1. HISTORICAL DATA ENGINE
 # ==========================================
 def fetch_raw_1min_candles(instrument_key):
     url = f"https://api.upstox.com/v2/historical-candle/intraday/{instrument_key}/1minute"
@@ -117,14 +117,13 @@ def fetch_strike_oi_parallel(keys, timeframe):
         if not df_1m.empty:
             df_res = resample_candles(df_1m, timeframe)
 
-            # Fix: Ensure the 09:15 AM candle gets calculated relative to opening OI baseline
-            first_oi = df_res["oi"].iloc[0] if len(df_res) > 0 else 0
-            df_res["oi_diff"] = df_res["oi"].diff().fillna(df_res["oi"] - first_oi)
+            # Fix 1: Calculate 09:15 AM candle delta against open OI instead of returning 0
+            df_res["oi_diff"] = df_res["oi"].diff().fillna(df_res["oi"])
             return df_res[["timestamp", "oi_diff"]]
         return pd.DataFrame()
 
     results = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=12) as executor:
         futures = [executor.submit(worker, k) for k in keys]
         for f in concurrent.futures.as_completed(futures):
             res = f.result()
@@ -156,7 +155,9 @@ def build_options_apex_dataset(timeframe, num_strikes, selected_expiry):
         return df_spot
 
     chain = sorted(chain, key=lambda x: x.get("strike_price", 0))
-    spot_price = df_spot["close"].iloc[-1]
+
+    # Fix 2: Multi-strike selection relative to spot price median
+    spot_price = df_spot["close"].median()
 
     closest_idx = min(
         range(len(chain)),
@@ -197,7 +198,7 @@ def build_options_apex_dataset(timeframe, num_strikes, selected_expiry):
     merged["call_oi_diff"] = merged["call_oi_diff"].fillna(0)
     merged["put_oi_diff"] = merged["put_oi_diff"].fillna(0)
 
-    # Position Builder: Put ΔOI - Call ΔOI
+    # Position Builder Formula: Put ΔOI - Call ΔOI
     merged["pos_builder"] = merged["put_oi_diff"] - merged["call_oi_diff"]
     merged["color"] = merged["pos_builder"].apply(
         lambda x: "#10b981" if x >= 0 else "#ef4444"
@@ -207,7 +208,7 @@ def build_options_apex_dataset(timeframe, num_strikes, selected_expiry):
 
 
 # ==========================================
-# 2. HEADER UI CONTROLS
+# 2. STREAMLIT CONTROLS
 # ==========================================
 col_title, col_tf, col_strikes, col_exp = st.columns([4, 2, 2, 2])
 
@@ -241,7 +242,7 @@ with col_exp:
 
 
 # ==========================================
-# 3. AUTOMATIC REFRESH FRAGMENT (EVERY 3 MIN)
+# 3. LIVE AUTO-REFRESH FRAGMENT (3 MINS)
 # ==========================================
 @st.fragment(run_every="180s")
 def render_live_chart(tf, count, expiry):
@@ -329,5 +330,4 @@ def render_live_chart(tf, count, expiry):
         st.error("Unable to load session data.")
 
 
-# Execute live update wrapper
 render_live_chart(tf_option, strike_count, expiry_input)
