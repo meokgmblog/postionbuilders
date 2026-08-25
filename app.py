@@ -326,7 +326,7 @@ def render_live_chart(tf, count, expiry):
             cols=1,
             shared_xaxes=True,
             vertical_spacing=0.015,
-            row_heights=[0.74, 0.26],
+            row_heights=[0.74, 0.46],
         )
 
         # Main Candlestick Chart (OHLC box hidden; only time displayed)
