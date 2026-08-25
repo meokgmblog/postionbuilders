@@ -13,18 +13,26 @@ SPOT_KEY = "NSE_INDEX|Nifty 50"
 
 
 # ==========================================
-# 1. UPSTOX LIVE API + RESAMPLING
+# 1. UPSTOX API (FULL DAY INTRADAY FETCH)
 # ==========================================
-def fetch_raw_1min_ohlc(instrument_key):
-    """Fetches valid 1minute candles directly from Upstox API with clean timezone handling."""
-    url = f"https://api.upstox.com/v2/historical-candle/intraday/{instrument_key}/1minute"
+def fetch_full_day_1min_ohlc(instrument_key):
+    """Fetches the complete day's 1-minute candles from market open to current execution time."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    # Using the date-bounded API route ensures full session retrieval
+    url = f"https://api.upstox.com/v2/historical-candle/{instrument_key}/1minute/{today}/{today}"
     headers = {
         "Accept": "application/json",
         "Authorization": f"Bearer {UPSTOX_TOKEN}",
     }
 
     try:
-        res = requests.get(url, headers=headers, timeout=6)
+        res = requests.get(url, headers=headers, timeout=8)
+        
+        # Fallback to standard intraday endpoint if date-specific route returns empty
+        if res.status_code != 200 or not res.json().get("data", {}).get("candles"):
+            url = f"https://api.upstox.com/v2/historical-candle/intraday/{instrument_key}/1minute"
+            res = requests.get(url, headers=headers, timeout=8)
+
         if res.status_code == 200:
             candles = res.json().get("data", {}).get("candles", [])
             if not candles:
@@ -32,34 +40,27 @@ def fetch_raw_1min_ohlc(instrument_key):
 
             df = pd.DataFrame(
                 candles,
-                columns=[
-                    "timestamp",
-                    "open",
-                    "high",
-                    "low",
-                    "close",
-                    "vol",
-                    "oi",
-                ],
+                columns=["timestamp", "open", "high", "low", "close", "vol", "oi"],
             )
-            # Parse datetime and remove timezone offset (make naive)
+            # Normalize timestamps to naive local time
             df["timestamp"] = pd.to_datetime(df["timestamp"]).dt.tz_localize(None)
 
-            # Filter out any timestamp strictly past current local execution time
+            # Ensure chronological order (9:15 AM -> Present)
+            df = df.sort_values("timestamp").reset_index(drop=True)
+            
+            # Filter strictly up to current system time
             now = datetime.now()
             df = df[df["timestamp"] <= now]
-            
-            return df.sort_values("timestamp").reset_index(drop=True)
-        else:
-            st.error(f"API Request Failed [{res.status_code}]: {res.text}")
+            return df
+
     except Exception as e:
-        st.error(f"Upstox Request Error: {e}")
+        st.error(f"Upstox Data Error: {e}")
 
     return pd.DataFrame()
 
 
 def resample_ohlc(df, timeframe="3min"):
-    """Resamples 1minute data to target timeframe (3min or 5min) accurately."""
+    """Accurately aggregates 1m candles to 3m/5m timeframe buckets."""
     if df.empty:
         return pd.DataFrame()
 
@@ -99,10 +100,10 @@ def fetch_option_chain(spot_key, expiry_date):
 
 
 def fetch_strike_oi_parallel(keys, timeframe):
-    """Fetches 1min candles in parallel and aggregates OI change per timeframe."""
+    """Fetches full session 1m option candles in parallel and aggregates OI change."""
 
     def worker(key):
-        df_1m = fetch_raw_1min_ohlc(key)
+        df_1m = fetch_full_day_1min_ohlc(key)
         if not df_1m.empty:
             df_res = resample_ohlc(df_1m, timeframe)
             df_res["oi_diff"] = df_res["oi"].diff().fillna(0)
@@ -125,7 +126,7 @@ def fetch_strike_oi_parallel(keys, timeframe):
 
 
 def build_options_apex_dataset(timeframe, num_strikes, expiry_date):
-    df_spot_1m = fetch_raw_1min_ohlc(SPOT_KEY)
+    df_spot_1m = fetch_full_day_1min_ohlc(SPOT_KEY)
     if df_spot_1m.empty:
         return pd.DataFrame()
 
@@ -195,7 +196,7 @@ def build_options_apex_dataset(timeframe, num_strikes, expiry_date):
 
 
 # ==========================================
-# 2. STREAMLIT UI
+# 2. STREAMLIT UI CONTROLS
 # ==========================================
 col_title, col_tf, col_strikes, col_exp = st.columns([4, 2, 2, 2])
 
@@ -230,7 +231,7 @@ df = build_options_apex_dataset(
 )
 
 # ==========================================
-# 3. PLOTLY CHART CANVAS
+# 3. PLOTLY CHART ENGINE
 # ==========================================
 if not df.empty:
     fig = make_subplots(
@@ -283,11 +284,13 @@ if not df.empty:
         showlegend=False,
     )
 
+    # Lock X-Axis strictly to current data range
     fig.update_xaxes(
         showgrid=True,
         gridcolor="#1f2937",
         color="#9ca3af",
         tickformat="%H:%M",
+        type="date",
         range=[
             df["timestamp"].min() - pd.Timedelta(minutes=5),
             df["timestamp"].max() + pd.Timedelta(minutes=5),
@@ -315,3 +318,5 @@ if not df.empty:
     )
 
     st.plotly_chart(fig, use_container_width=True)
+else:
+    st.error("No data fetched for the current session. Please check Upstox token or market session.")
