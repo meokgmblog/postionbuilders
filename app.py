@@ -7,7 +7,7 @@ import requests
 import streamlit as st
 
 # ==========================================
-# PAGE CONFIG & STRICT VIEWPORT CSS
+# PAGE CONFIG & STRICT CSS
 # ==========================================
 st.set_page_config(
     layout="wide",
@@ -29,15 +29,20 @@ st.markdown(
         }
         
         div.block-container {
-            padding-top: 0.2rem !important;
+            padding-top: 0.1rem !important;
             padding-bottom: 0rem !important;
-            padding-left: 1rem !important;
-            padding-right: 1rem !important;
+            padding-left: 0.8rem !important;
+            padding-right: 0.8rem !important;
             max-width: 100% !important;
         }
         
         div[data-testid="stVerticalBlock"] > div {
-            gap: 0.2rem !important;
+            gap: 0.1rem !important;
+        }
+        
+        /* Fixed Horizontal Control Alignment */
+        div[data-testid="column"] {
+            padding: 0px 2px !important;
         }
         
         /* Dropdown Control Styling */
@@ -46,13 +51,13 @@ st.markdown(
             border: 1px solid #363c4e !important;
             color: #d1d4dc !important;
             border-radius: 4px;
-            min-height: 32px !important;
-            height: 32px !important;
+            min-height: 28px !important;
+            height: 28px !important;
         }
         div[data-baseweb="select"] span {
             color: #d1d4dc !important;
             font-weight: 600 !important;
-            font-size: 13px !important;
+            font-size: 12px !important;
         }
         div[role="listbox"] {
             background-color: #1e222d !important;
@@ -63,21 +68,21 @@ st.markdown(
             background-color: #131722;
             border: 1px solid #2a2e39;
             border-radius: 4px;
-            padding: 4px 10px;
+            padding: 2px 8px;
             margin-bottom: 2px;
         }
         .metric-label {
             color: #787b86;
-            font-size: 10px;
+            font-size: 9px;
             font-weight: 600;
             text-transform: uppercase;
             line-height: 1.1;
         }
         .metric-val {
-            font-size: 15px;
+            font-size: 14px;
             font-weight: 700;
             color: #d1d4dc;
-            line-height: 1.2;
+            line-height: 1.1;
         }
     </style>
 """,
@@ -271,47 +276,49 @@ def build_options_apex_dataset(timeframe, num_strikes, selected_expiry):
 
 
 # ==========================================
-# 2. CONTROLS BAR
+# 2. VISIBLE TOP CONTROLS BAR (DEFAULT: 3min & 3 Strikes)
 # ==========================================
-c1, c2, c3, c4 = st.columns([3, 1.5, 1.5, 2.5])
+top_bar = st.container()
+with top_bar:
+    c1, c2, c3, c4, c_space = st.columns([2.5, 1.2, 1.2, 2.0, 3.1])
 
-with c1:
-    st.markdown(
-        "<h3 style='margin:0; padding-top:2px; font-size:18px; color:#f0f3fa;'>NIFTY 50 <span style='font-size:12px; color:#787b86;'>| MULTI-STRIKE</span></h3>",
-        unsafe_allow_html=True,
-    )
+    with c1:
+        st.markdown(
+            "<h4 style='margin:0; padding-top:2px; font-size:16px; color:#f0f3fa; white-space:nowrap;'>NIFTY 50 <span style='font-size:11px; color:#787b86;'>| MULTI-STRIKE</span></h4>",
+            unsafe_allow_html=True,
+        )
 
-with c2:
-    tf_option = st.selectbox(
-        "TF",
-        options=["3min", "5min"],
-        index=0,
-        key="tf_select",
-        label_visibility="collapsed",
-    )
+    with c2:
+        tf_option = st.selectbox(
+            "TF",
+            options=["3min", "5min"],
+            index=0,  # Default: 3min
+            key="tf_select",
+            label_visibility="collapsed",
+        )
 
-with c3:
-    strike_count = st.selectbox(
-        "Strikes",
-        options=[3, 5, 10],
-        index=1,
-        key="strike_select",
-        label_visibility="collapsed",
-    )
+    with c3:
+        strike_count = st.selectbox(
+            "Strikes",
+            options=[3, 5, 10],
+            index=0,  # Default: 3
+            key="strike_select",
+            label_visibility="collapsed",
+        )
 
-with c4:
-    available_expiries = get_expiry_dates(SPOT_KEY)
-    expiry_input = st.selectbox(
-        "Expiry",
-        options=available_expiries,
-        index=0,
-        key="expiry_select",
-        label_visibility="collapsed",
-    )
+    with c4:
+        available_expiries = get_expiry_dates(SPOT_KEY)
+        expiry_input = st.selectbox(
+            "Expiry",
+            options=available_expiries,
+            index=0,
+            key="expiry_select",
+            label_visibility="collapsed",
+        )
 
 
 # ==========================================
-# 3. LIVE CHART WITH UNIFIED CROSSHAIR & PROPER HISTOGRAM SCALING
+# 3. LIVE CHART ENGINE
 # ==========================================
 @st.fragment(run_every="180s")
 def render_live_chart(tf, count, expiry):
@@ -329,7 +336,7 @@ def render_live_chart(tf, count, expiry):
             st.markdown(
                 f"""<div class='metric-card'>
                 <div class='metric-label'>Spot Price</div>
-                <div class='metric-val'>{last_row['close']:.2f} <span style='font-size:11px; color:{change_color};'>({pct_change:+.2f}%)</span></div>
+                <div class='metric-val'>{last_row['close']:.2f} <span style='font-size:10px; color:{change_color};'>({pct_change:+.2f}%)</span></div>
             </div>""",
                 unsafe_allow_html=True,
             )
@@ -370,7 +377,7 @@ def render_live_chart(tf, count, expiry):
             row_heights=[0.68, 0.32],
         )
 
-        # Candlestick Track
+        # Candlestick
         fig.add_trace(
             go.Candlestick(
                 x=df["timestamp"],
@@ -388,7 +395,7 @@ def render_live_chart(tf, count, expiry):
             col=1,
         )
 
-        # Position Builder Histogram Track
+        # Position Builder Histogram
         fig.add_trace(
             go.Bar(
                 x=df["timestamp"],
@@ -402,20 +409,19 @@ def render_live_chart(tf, count, expiry):
             col=1,
         )
 
-        # Unified TradingView Layout Setup
+        # Layout Settings
         fig.update_layout(
             template="plotly_dark",
             paper_bgcolor="#131722",
             plot_bgcolor="#131722",
             margin=dict(l=10, r=60, t=10, b=25),
-            height=530,
+            height=510,
             dragmode="pan",
             xaxis_rangeslider_visible=False,
             hovermode="x unified",
             showlegend=False,
         )
 
-        # Continuous Vertical & Horizontal Crosshair (Spikes across top to bottom)
         spike_config = dict(
             showspikes=True,
             spikemode="across+marker",
@@ -425,7 +431,7 @@ def render_live_chart(tf, count, expiry):
             spikesnap="cursor",
         )
 
-        # X-Axis Top Pane
+        # Top Axis
         fig.update_xaxes(
             showgrid=True,
             gridcolor="#2a2e39",
@@ -436,7 +442,6 @@ def render_live_chart(tf, count, expiry):
             **spike_config,
         )
 
-        # Y-Axis Top Price Pane
         fig.update_yaxes(
             showgrid=True,
             gridcolor="#2a2e39",
@@ -449,7 +454,7 @@ def render_live_chart(tf, count, expiry):
             **spike_config,
         )
 
-        # X-Axis Bottom Pane
+        # Bottom Axis
         fig.update_xaxes(
             showgrid=True,
             gridcolor="#2a2e39",
@@ -462,9 +467,7 @@ def render_live_chart(tf, count, expiry):
             **spike_config,
         )
 
-        # Position Builder Y-Axis Scaling (Removes huge opening spike distortion)
         if len(df) > 2:
-            # Scale range using 98th percentile so regular bars are tall and clear
             scaled_max = df["pos_builder"].abs().quantile(0.98)
             if scaled_max > 0:
                 fig.update_yaxes(
