@@ -7,7 +7,7 @@ import requests
 import streamlit as st
 
 # ==========================================
-# PAGE CONFIG & NO-SCROLL STRICT CSS
+# PAGE CONFIG & ENHANCED VISIBILITY CSS
 # ==========================================
 st.set_page_config(
     layout="wide",
@@ -15,72 +15,55 @@ st.set_page_config(
     page_icon="📈",
 )
 
-# Strict CSS to fit everything in 100vh without vertical scrolling
+# Custom CSS for dark TradingView theme & visible inputs
 st.markdown(
     """
     <style>
-        /* Force app container to fit standard viewports without scrollbars */
-        html, body, [data-testid="stAppViewContainer"] {
-            overflow: hidden !important;
+        .stApp {
             background-color: #0d1117;
             color: #d1d4dc;
         }
-        
-        .stApp {
-            background-color: #0d1117;
-        }
-        
         div.block-container {
-            padding-top: 0.2rem !important;
-            padding-bottom: 0rem !important;
-            padding-left: 1rem !important;
-            padding-right: 1rem !important;
-            max-width: 100% !important;
+            padding-top: 0.5rem;
+            padding-bottom: 0rem;
         }
         
-        /* Remove default Streamlit vertical gaps between elements */
-        div[data-testid="stVerticalBlock"] > div {
-            gap: 0.2rem !important;
-        }
-        
-        /* Dropdown Control Styling */
+        /* Fix Control Bar Dropdown Visibility */
         div[data-baseweb="select"] > div {
             background-color: #1e222d !important;
             border: 1px solid #363c4e !important;
             color: #d1d4dc !important;
             border-radius: 4px;
-            min-height: 32px !important;
-            height: 32px !important;
         }
         div[data-baseweb="select"] span {
             color: #d1d4dc !important;
             font-weight: 600 !important;
-            font-size: 13px !important;
         }
         div[role="listbox"] {
             background-color: #1e222d !important;
         }
+        div[role="option"] {
+            color: #d1d4dc !important;
+        }
         
-        /* Ultra-compact Metric Cards */
+        /* Metric Cards Styling */
         .metric-card {
             background-color: #131722;
             border: 1px solid #2a2e39;
-            border-radius: 4px;
-            padding: 4px 10px;
-            margin-bottom: 2px;
+            border-radius: 6px;
+            padding: 8px 14px;
+            margin-bottom: 6px;
         }
         .metric-label {
             color: #787b86;
-            font-size: 10px;
+            font-size: 11px;
             font-weight: 600;
             text-transform: uppercase;
-            line-height: 1.1;
         }
         .metric-val {
-            font-size: 15px;
+            font-size: 17px;
             font-weight: 700;
             color: #d1d4dc;
-            line-height: 1.2;
         }
     </style>
 """,
@@ -274,54 +257,42 @@ def build_options_apex_dataset(timeframe, num_strikes, selected_expiry):
 
 
 # ==========================================
-# 2. COMPACT HEADER BAR
+# 2. CLEAR & VISIBLE CONTROL BAR
 # ==========================================
-c1, c2, c3, c4 = st.columns([3, 1.5, 1.5, 2.5])
+c1, c2, c3, c4 = st.columns([3, 2, 2, 3])
 
 with c1:
     st.markdown(
-        "<h3 style='margin:0; padding-top:2px; font-size:18px; color:#f0f3fa;'>NIFTY 50 <span style='font-size:12px; color:#787b86;'>| MULTI-STRIKE</span></h3>",
+        "<h3 style='margin:0; padding-top:4px; color:#f0f3fa;'>NIFTY 50 <span style='font-size:13px; color:#787b86;'>| MULTI-STRIKE</span></h3>",
         unsafe_allow_html=True,
     )
 
 with c2:
     tf_option = st.selectbox(
-        "TF",
-        options=["3min", "5min"],
-        index=0,
-        key="tf_select",
-        label_visibility="collapsed",
+        "Timeframe", options=["3min", "5min"], index=0, key="tf_select"
     )
 
 with c3:
     strike_count = st.selectbox(
-        "Strikes",
-        options=[3, 5, 10],
-        index=1,
-        key="strike_select",
-        label_visibility="collapsed",
+        "Strike Range", options=[3, 5, 10], index=1, key="strike_select"
     )
 
 with c4:
     available_expiries = get_expiry_dates(SPOT_KEY)
     expiry_input = st.selectbox(
-        "Expiry",
-        options=available_expiries,
-        index=0,
-        key="expiry_select",
-        label_visibility="collapsed",
+        "Expiry Date", options=available_expiries, index=0, key="expiry_select"
     )
 
 
 # ==========================================
-# 3. COMPACT SINGLE-SCREEN CHART
+# 3. LIVE CHART & FRAGMENT (FIXED RATIO & PAN DEFAULT)
 # ==========================================
 @st.fragment(run_every="180s")
 def render_live_chart(tf, count, expiry):
     df = build_options_apex_dataset(tf, count, expiry)
 
     if not df.empty:
-        # Compact Cards
+        # Display Metric Bar Above Chart
         last_row = df.iloc[-1]
         prev_close = df.iloc[-2]["close"] if len(df) > 1 else last_row["open"]
         spot_change = last_row["close"] - prev_close
@@ -333,7 +304,7 @@ def render_live_chart(tf, count, expiry):
             st.markdown(
                 f"""<div class='metric-card'>
                 <div class='metric-label'>Spot Price</div>
-                <div class='metric-val'>{last_row['close']:.2f} <span style='font-size:11px; color:{change_color};'>({pct_change:+.2f}%)</span></div>
+                <div class='metric-val'>{last_row['close']:.2f} <span style='font-size:12px; color:{change_color};'>({pct_change:+.2f}%)</span></div>
             </div>""",
                 unsafe_allow_html=True,
             )
@@ -365,7 +336,7 @@ def render_live_chart(tf, count, expiry):
                 unsafe_allow_html=True,
             )
 
-        # Plotly Setup (Height adjusted to 530px to prevent viewport scroll)
+        # Plotly Setup (Increased bottom pane height from 0.25 -> 0.35)
         fig = make_subplots(
             rows=2,
             cols=1,
@@ -406,14 +377,14 @@ def render_live_chart(tf, count, expiry):
             col=1,
         )
 
-        # Layout Setup
+        # Layout Setup (dragmode='pan' removes default box zoom)
         fig.update_layout(
             template="plotly_dark",
             paper_bgcolor="#131722",
             plot_bgcolor="#131722",
-            margin=dict(l=10, r=60, t=10, b=25),  # Extra bottom margin for X-axis labels
-            height=530,  # Strict height fitting standard screens without scrolling
-            dragmode="pan",
+            margin=dict(l=10, r=60, t=10, b=10),
+            height=680,
+            dragmode="pan",  # Defaults drag to pan/scroll instead of zoom box
             xaxis_rangeslider_visible=False,
             hovermode="x unified",
             showlegend=False,
@@ -451,7 +422,7 @@ def render_live_chart(tf, count, expiry):
             col=1,
         )
 
-        # X-Axis Row 2 (Visible timestamp formatting)
+        # X-Axis Row 2
         fig.update_xaxes(
             showgrid=True,
             gridcolor="#2a2e39",
@@ -468,16 +439,13 @@ def render_live_chart(tf, count, expiry):
             col=1,
         )
 
-        # Position Builder Subplot Y-Axis
+        # Position Builder Subplot Y-Axis (Auto-scaled to ignore huge 9:15 AM spike)
         if len(df) > 1:
+            # Exclude extreme outlier spikes for cleaner axis display
             filtered_oi = df["pos_builder"].abs()
-            sub_max = (
-                filtered_oi.iloc[1:].max() if len(df) > 2 else filtered_oi.max()
-            )
+            sub_max = filtered_oi.iloc[1:].max() if len(df) > 2 else filtered_oi.max()
             if sub_max > 0:
-                fig.update_yaxes(
-                    range=[-sub_max * 1.15, sub_max * 1.15], row=2, col=1
-                )
+                fig.update_yaxes(range=[-sub_max * 1.15, sub_max * 1.15], row=2, col=1)
 
         fig.update_yaxes(
             showgrid=True,
