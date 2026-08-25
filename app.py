@@ -7,7 +7,7 @@ import requests
 import streamlit as st
 
 # ==========================================
-# PAGE CONFIG & ENHANCED VISIBILITY CSS
+# PAGE CONFIG & STRICT VIEWPORT CSS
 # ==========================================
 st.set_page_config(
     layout="wide",
@@ -15,55 +15,69 @@ st.set_page_config(
     page_icon="📈",
 )
 
-# Custom CSS for dark TradingView theme & visible inputs
 st.markdown(
     """
     <style>
-        .stApp {
+        html, body, [data-testid="stAppViewContainer"] {
+            overflow: hidden !important;
             background-color: #0d1117;
             color: #d1d4dc;
         }
-        div.block-container {
-            padding-top: 0.5rem;
-            padding-bottom: 0rem;
+        
+        .stApp {
+            background-color: #0d1117;
         }
         
-        /* Fix Control Bar Dropdown Visibility */
+        div.block-container {
+            padding-top: 0.2rem !important;
+            padding-bottom: 0rem !important;
+            padding-left: 1rem !important;
+            padding-right: 1rem !important;
+            max-width: 100% !important;
+        }
+        
+        div[data-testid="stVerticalBlock"] > div {
+            gap: 0.2rem !important;
+        }
+        
+        /* Dropdown Control Styling */
         div[data-baseweb="select"] > div {
             background-color: #1e222d !important;
             border: 1px solid #363c4e !important;
             color: #d1d4dc !important;
             border-radius: 4px;
+            min-height: 32px !important;
+            height: 32px !important;
         }
         div[data-baseweb="select"] span {
             color: #d1d4dc !important;
             font-weight: 600 !important;
+            font-size: 13px !important;
         }
         div[role="listbox"] {
             background-color: #1e222d !important;
         }
-        div[role="option"] {
-            color: #d1d4dc !important;
-        }
         
-        /* Metric Cards Styling */
+        /* Compact Metric Cards */
         .metric-card {
             background-color: #131722;
             border: 1px solid #2a2e39;
-            border-radius: 6px;
-            padding: 8px 14px;
-            margin-bottom: 6px;
+            border-radius: 4px;
+            padding: 4px 10px;
+            margin-bottom: 2px;
         }
         .metric-label {
             color: #787b86;
-            font-size: 11px;
+            font-size: 10px;
             font-weight: 600;
             text-transform: uppercase;
+            line-height: 1.1;
         }
         .metric-val {
-            font-size: 17px;
+            font-size: 15px;
             font-weight: 700;
             color: #d1d4dc;
+            line-height: 1.2;
         }
     </style>
 """,
@@ -257,42 +271,53 @@ def build_options_apex_dataset(timeframe, num_strikes, selected_expiry):
 
 
 # ==========================================
-# 2. CLEAR & VISIBLE CONTROL BAR
+# 2. CONTROLS BAR
 # ==========================================
-c1, c2, c3, c4 = st.columns([3, 2, 2, 3])
+c1, c2, c3, c4 = st.columns([3, 1.5, 1.5, 2.5])
 
 with c1:
     st.markdown(
-        "<h3 style='margin:0; padding-top:4px; color:#f0f3fa;'>NIFTY 50 <span style='font-size:13px; color:#787b86;'>| MULTI-STRIKE</span></h3>",
+        "<h3 style='margin:0; padding-top:2px; font-size:18px; color:#f0f3fa;'>NIFTY 50 <span style='font-size:12px; color:#787b86;'>| MULTI-STRIKE</span></h3>",
         unsafe_allow_html=True,
     )
 
 with c2:
     tf_option = st.selectbox(
-        "Timeframe", options=["3min", "5min"], index=0, key="tf_select"
+        "TF",
+        options=["3min", "5min"],
+        index=0,
+        key="tf_select",
+        label_visibility="collapsed",
     )
 
 with c3:
     strike_count = st.selectbox(
-        "Strike Range", options=[3, 5, 10], index=1, key="strike_select"
+        "Strikes",
+        options=[3, 5, 10],
+        index=1,
+        key="strike_select",
+        label_visibility="collapsed",
     )
 
 with c4:
     available_expiries = get_expiry_dates(SPOT_KEY)
     expiry_input = st.selectbox(
-        "Expiry Date", options=available_expiries, index=0, key="expiry_select"
+        "Expiry",
+        options=available_expiries,
+        index=0,
+        key="expiry_select",
+        label_visibility="collapsed",
     )
 
 
 # ==========================================
-# 3. LIVE CHART & FRAGMENT (FIXED RATIO & PAN DEFAULT)
+# 3. LIVE CHART WITH UNIFIED CROSSHAIR & PROPER HISTOGRAM SCALING
 # ==========================================
 @st.fragment(run_every="180s")
 def render_live_chart(tf, count, expiry):
     df = build_options_apex_dataset(tf, count, expiry)
 
     if not df.empty:
-        # Display Metric Bar Above Chart
         last_row = df.iloc[-1]
         prev_close = df.iloc[-2]["close"] if len(df) > 1 else last_row["open"]
         spot_change = last_row["close"] - prev_close
@@ -304,7 +329,7 @@ def render_live_chart(tf, count, expiry):
             st.markdown(
                 f"""<div class='metric-card'>
                 <div class='metric-label'>Spot Price</div>
-                <div class='metric-val'>{last_row['close']:.2f} <span style='font-size:12px; color:{change_color};'>({pct_change:+.2f}%)</span></div>
+                <div class='metric-val'>{last_row['close']:.2f} <span style='font-size:11px; color:{change_color};'>({pct_change:+.2f}%)</span></div>
             </div>""",
                 unsafe_allow_html=True,
             )
@@ -336,16 +361,16 @@ def render_live_chart(tf, count, expiry):
                 unsafe_allow_html=True,
             )
 
-        # Plotly Setup (Increased bottom pane height from 0.25 -> 0.35)
+        # Plotly Subplots
         fig = make_subplots(
             rows=2,
             cols=1,
             shared_xaxes=True,
-            vertical_spacing=0.03,
-            row_heights=[0.65, 0.45],
+            vertical_spacing=0.02,
+            row_heights=[0.68, 0.32],
         )
 
-        # Candlestick
+        # Candlestick Track
         fig.add_trace(
             go.Candlestick(
                 x=df["timestamp"],
@@ -363,7 +388,7 @@ def render_live_chart(tf, count, expiry):
             col=1,
         )
 
-        # Position Builder Histogram
+        # Position Builder Histogram Track
         fig.add_trace(
             go.Bar(
                 x=df["timestamp"],
@@ -377,35 +402,41 @@ def render_live_chart(tf, count, expiry):
             col=1,
         )
 
-        # Layout Setup (dragmode='pan' removes default box zoom)
+        # Unified TradingView Layout Setup
         fig.update_layout(
             template="plotly_dark",
             paper_bgcolor="#131722",
             plot_bgcolor="#131722",
-            margin=dict(l=10, r=60, t=10, b=10),
-            height=510,
-            dragmode="pan",  # Defaults drag to pan/scroll instead of zoom box
+            margin=dict(l=10, r=60, t=10, b=25),
+            height=530,
+            dragmode="pan",
             xaxis_rangeslider_visible=False,
             hovermode="x unified",
             showlegend=False,
         )
 
-        # X-Axis Row 1
+        # Continuous Vertical & Horizontal Crosshair (Spikes across top to bottom)
+        spike_config = dict(
+            showspikes=True,
+            spikemode="across+marker",
+            spikecolor="#9194a1",
+            spikethickness=1,
+            spikedash="dash",
+            spikesnap="cursor",
+        )
+
+        # X-Axis Top Pane
         fig.update_xaxes(
             showgrid=True,
             gridcolor="#2a2e39",
             gridwidth=1,
-            showspikes=True,
-            spikemode="across",
-            spikecolor="#787b86",
-            spikethickness=1,
-            spikedash="dash",
             rangebreaks=[dict(bounds=["sat", "mon"])],
             row=1,
             col=1,
+            **spike_config,
         )
 
-        # Price Axis Row 1
+        # Y-Axis Top Price Pane
         fig.update_yaxes(
             showgrid=True,
             gridcolor="#2a2e39",
@@ -413,39 +444,32 @@ def render_live_chart(tf, count, expiry):
             color="#787b86",
             side="right",
             tickfont=dict(family="Courier New, monospace", size=11),
-            showspikes=True,
-            spikemode="across",
-            spikecolor="#787b86",
-            spikethickness=1,
-            spikedash="dash",
             row=1,
             col=1,
+            **spike_config,
         )
 
-        # X-Axis Row 2
+        # X-Axis Bottom Pane
         fig.update_xaxes(
             showgrid=True,
             gridcolor="#2a2e39",
             color="#787b86",
             tickformat="%H:%M",
             type="date",
-            showspikes=True,
-            spikemode="across",
-            spikecolor="#787b86",
-            spikethickness=1,
-            spikedash="dash",
             rangebreaks=[dict(bounds=["sat", "mon"])],
             row=2,
             col=1,
+            **spike_config,
         )
 
-        # Position Builder Subplot Y-Axis (Auto-scaled to ignore huge 9:15 AM spike)
-        if len(df) > 1:
-            # Exclude extreme outlier spikes for cleaner axis display
-            filtered_oi = df["pos_builder"].abs()
-            sub_max = filtered_oi.iloc[1:].max() if len(df) > 2 else filtered_oi.max()
-            if sub_max > 0:
-                fig.update_yaxes(range=[-sub_max * 1.15, sub_max * 1.15], row=2, col=1)
+        # Position Builder Y-Axis Scaling (Removes huge opening spike distortion)
+        if len(df) > 2:
+            # Scale range using 98th percentile so regular bars are tall and clear
+            scaled_max = df["pos_builder"].abs().quantile(0.98)
+            if scaled_max > 0:
+                fig.update_yaxes(
+                    range=[-scaled_max * 1.25, scaled_max * 1.25], row=2, col=1
+                )
 
         fig.update_yaxes(
             showgrid=True,
@@ -458,6 +482,7 @@ def render_live_chart(tf, count, expiry):
             tickfont=dict(family="Courier New, monospace", size=10),
             row=2,
             col=1,
+            **spike_config,
         )
 
         st.plotly_chart(
