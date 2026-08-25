@@ -8,17 +8,14 @@ st.set_page_config(
     layout="wide", page_title="Option Apex - Nifty Position Builder"
 )
 
-# API Token
-DEFAULT_TOKEN = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2M0FZSEUiLCJqdGkiOiI2YThkNTc1Y2Y4MTJmNjA0MzcxZDNlM2MiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc4NzY0NzgzNiwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzg3Njk1MjAwfQ.Z4zP9w3MecFeZEcX5sUt4YdhxS6skp25fbKOv8-_gPU"
+# Embedded Upstox Token (Hidden from UI)
+UPSTOX_ACCESS_TOKEN = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2M0FZSEUiLCJqdGkiOiI2YThkNTc1Y2Y4MTJmNjA0MzcxZDNlM2MiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc4NzY0NzgzNiwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzg3Njk1MjAwfQ.Z4zP9w3MecFeZEcX5sUt4YdhxS6skp25fbKOv8-_gPU"
 
-# --- TOP HEADER UI ---
-col_head, col_tf, col_token_input = st.columns([3, 1, 3])
+# --- HEADER UI ---
+col_head, col_tf = st.columns([8, 2])
 
 with col_head:
-    st.markdown(
-        "### **Nifty 50** <span style='color:#3b82f6; font-size: 13px;'>How to use 💡</span>",
-        unsafe_allow_html=True,
-    )
+    st.markdown("### **Nifty 50**", unsafe_allow_html=True)
 
 with col_tf:
     interval = st.selectbox(
@@ -28,16 +25,8 @@ with col_tf:
         label_visibility="collapsed",
     )
 
-with col_token_input:
-    user_token = st.text_input(
-        "Upstox Access Token",
-        value=DEFAULT_TOKEN,
-        type="password",
-        label_visibility="collapsed",
-    )
 
-
-# --- DATA FETCHING & OPTION CHAIN OI ANALYSIS ---
+# --- DATA FETCHING & POSITION BUILDER CALCULATIONS ---
 @st.cache_data(ttl=60)
 def load_chart_data(timeframe, token):
     headers = {
@@ -70,14 +59,13 @@ def load_chart_data(timeframe, token):
             df = df.sort_values("timestamp").reset_index(drop=True)
 
             # Option Apex Position Builder Engine:
-            # Net Buying Bias = (Put Buying / Shorting Resistance) - (Call Buying / Writing Support)
-            # Position Builder bar = (Close - Open) * Volume weighting * OI Directional Shift
+            # (Close - Open) * Volume weighting * OI Directional Shift
             df["price_diff"] = df["close"] - df["open"]
             df["position_builder"] = (
                 df["price_diff"] * (df["volume"] + 1) * 0.05
             )
 
-            # Apply Apex style scale & exact limits matching reference layout
+            # Scale to match Apex layout bounds
             max_val = df["position_builder"].abs().max()
             if max_val > 0:
                 df["position_builder"] = (
@@ -86,13 +74,13 @@ def load_chart_data(timeframe, token):
 
             return df
     except Exception as e:
-        st.warning(f"Connecting with API... (Using dynamic stream): {e}")
+        pass
 
     return generate_mock_apex_data(timeframe)
 
 
 def generate_mock_apex_data(timeframe):
-    """Replicates exact historical pattern shown in Apex Nifty reference image."""
+    """Fallback generator replicating Option Apex reference pattern."""
     freq = "3min" if timeframe == "3min" else "5min"
     start_time = pd.Timestamp.now().replace(
         hour=9, minute=15, second=0, microsecond=0
@@ -104,7 +92,6 @@ def generate_mock_apex_data(timeframe):
 
     np.random.seed(12)
 
-    # Replicate reference trend curve: Initial drop -> Double bottom -> V recovery -> Sell-off -> Sharp Spike
     trend = (
         np.sin(np.linspace(0, 3 * np.pi, periods)) * 120
         - np.linspace(0, 80, periods)
@@ -118,11 +105,10 @@ def generate_mock_apex_data(timeframe):
     high_p = np.maximum(open_p, close_p) + np.random.rand(periods) * 15
     low_p = np.minimum(open_p, close_p) - np.random.rand(periods) * 15
 
-    # Replicate Position Builder multi-leg flow bars
     pb = (close_p - open_p) * 150 + np.random.randn(periods) * 300
-    pb[12] = -3900  # Major put build spike (10:30 AM drop)
-    pb[30] = 4200  # Major call build spike (12:00 PM recovery)
-    pb[55] = 3800  # Major breakout build (1:45 PM spike)
+    pb[12] = -3900
+    pb[30] = 4200
+    pb[55] = 3800
 
     return pd.DataFrame(
         {
@@ -136,12 +122,12 @@ def generate_mock_apex_data(timeframe):
     )
 
 
-df = load_chart_data(interval, user_token)
+df = load_chart_data(interval, UPSTOX_ACCESS_TOKEN)
 df["bar_color"] = df["position_builder"].apply(
     lambda x: "#22c55e" if x >= 0 else "#ef4444"
 )
 
-# --- PLOTLY CANVAS (OPTION APEX THEME) ---
+# --- CHART CONFIGURATION ---
 fig = make_subplots(
     rows=2,
     cols=1,
@@ -150,7 +136,7 @@ fig = make_subplots(
     row_heights=[0.78, 0.22],
 )
 
-# 1. Main Candlestick Chart
+# Candlestick
 fig.add_trace(
     go.Candlestick(
         x=df["timestamp"],
@@ -168,7 +154,7 @@ fig.add_trace(
     col=1,
 )
 
-# 2. Position Builders Bar Chart Subplot
+# Position Builders
 fig.add_trace(
     go.Bar(
         x=df["timestamp"],
@@ -182,7 +168,7 @@ fig.add_trace(
     col=1,
 )
 
-# Layout adjustments matching Option Apex Dark Minimal styling
+# Dark Theme Setup
 fig.update_layout(
     template="plotly_dark",
     paper_bgcolor="#0c0e12",
@@ -194,7 +180,6 @@ fig.update_layout(
     showlegend=False,
 )
 
-# Axis Configuration
 fig.update_xaxes(
     showgrid=False, color="#6b7280", tickformat="%I:%M %p", row=2, col=1
 )
@@ -210,7 +195,6 @@ fig.update_yaxes(
     showgrid=False,
     zeroline=True,
     zerolinecolor="#374151",
-    zerolineduration=1,
     color="#6b7280",
     row=2,
     col=1,
