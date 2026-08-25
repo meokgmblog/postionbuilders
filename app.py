@@ -13,10 +13,9 @@ SPOT_KEY = "NSE_INDEX|Nifty 50"
 
 
 # ==========================================
-# 1. UPSTOX RAW FETCH & RESAMPLING
+# 1. DATA ENGINE (FIXED FIRST BAR DELTA)
 # ==========================================
 def fetch_raw_1min_candles(instrument_key):
-    """Fetches full 1-minute intraday candles directly from Upstox API."""
     url = f"https://api.upstox.com/v2/historical-candle/intraday/{instrument_key}/1minute"
     headers = {
         "Accept": "application/json",
@@ -42,7 +41,6 @@ def fetch_raw_1min_candles(instrument_key):
                     "oi",
                 ],
             )
-            # Parse timestamp to naive datetime string matching market local time
             df["timestamp"] = pd.to_datetime(df["timestamp"]).dt.tz_localize(
                 None
             )
@@ -54,7 +52,6 @@ def fetch_raw_1min_candles(instrument_key):
 
 
 def resample_candles(df, timeframe="3min"):
-    """Resamples 1m candles into 3m or 5m intervals cleanly."""
     if df.empty:
         return pd.DataFrame()
 
@@ -80,7 +77,6 @@ def resample_candles(df, timeframe="3min"):
 
 
 def get_expiry_dates(spot_key):
-    """Retrieves active contract expiry dates from Upstox Option Chain."""
     url = f"https://api.upstox.com/v2/option/chain?instrument_key={spot_key}"
     headers = {
         "Accept": "application/json",
@@ -116,13 +112,14 @@ def fetch_option_chain(spot_key, expiry_date):
 
 
 def fetch_strike_oi_parallel(keys, timeframe):
-    """Parallel fetch worker for strike level intraday OI."""
-
     def worker(key):
         df_1m = fetch_raw_1min_candles(key)
         if not df_1m.empty:
             df_res = resample_candles(df_1m, timeframe)
-            df_res["oi_diff"] = df_res["oi"].diff().fillna(0)
+
+            # Fix: Ensure the 09:15 AM candle gets calculated relative to opening OI baseline
+            first_oi = df_res["oi"].iloc[0] if len(df_res) > 0 else 0
+            df_res["oi_diff"] = df_res["oi"].diff().fillna(df_res["oi"] - first_oi)
             return df_res[["timestamp", "oi_diff"]]
         return pd.DataFrame()
 
@@ -184,7 +181,6 @@ def build_options_apex_dataset(timeframe, num_strikes, selected_expiry):
     df_calls = fetch_strike_oi_parallel(call_keys, timeframe)
     df_puts = fetch_strike_oi_parallel(put_keys, timeframe)
 
-    # Left Merge onto Nifty Spot to preserve ALL session candles
     merged = pd.merge(
         df_spot,
         df_calls.rename(columns={"oi_diff": "call_oi_diff"}),
@@ -201,7 +197,7 @@ def build_options_apex_dataset(timeframe, num_strikes, selected_expiry):
     merged["call_oi_diff"] = merged["call_oi_diff"].fillna(0)
     merged["put_oi_diff"] = merged["put_oi_diff"].fillna(0)
 
-    # Calculate Position Builder: Put ΔOI - Call ΔOI
+    # Position Builder: Put ΔOI - Call ΔOI
     merged["pos_builder"] = merged["put_oi_diff"] - merged["call_oi_diff"]
     merged["color"] = merged["pos_builder"].apply(
         lambda x: "#10b981" if x >= 0 else "#ef4444"
@@ -211,7 +207,7 @@ def build_options_apex_dataset(timeframe, num_strikes, selected_expiry):
 
 
 # ==========================================
-# 2. STREAMLIT UI LAYOUT
+# 2. HEADER UI CONTROLS
 # ==========================================
 col_title, col_tf, col_strikes, col_exp = st.columns([4, 2, 2, 2])
 
@@ -243,90 +239,95 @@ with col_exp:
         label_visibility="collapsed",
     )
 
-df = build_options_apex_dataset(tf_option, strike_count, expiry_input)
 
 # ==========================================
-# 3. PLOTLY CHART ENGINE
+# 3. AUTOMATIC REFRESH FRAGMENT (EVERY 3 MIN)
 # ==========================================
-if not df.empty:
-    fig = make_subplots(
-        rows=2,
-        cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.03,
-        row_heights=[0.7, 0.3],
-    )
+@st.fragment(run_every="180s")
+def render_live_chart(tf, count, expiry):
+    df = build_options_apex_dataset(tf, count, expiry)
 
-    # Nifty Spot Candlestick
-    fig.add_trace(
-        go.Candlestick(
-            x=df["timestamp"],
-            open=df["open"],
-            high=df["high"],
-            low=df["low"],
-            close=df["close"],
-            name="Nifty 50 Spot",
-            increasing_line_color="#10b981",
-            decreasing_line_color="#ef4444",
-            increasing_fillcolor="#10b981",
-            decreasing_fillcolor="#ef4444",
-        ),
-        row=1,
-        col=1,
-    )
+    if not df.empty:
+        fig = make_subplots(
+            rows=2,
+            cols=1,
+            shared_xaxes=True,
+            vertical_spacing=0.03,
+            row_heights=[0.72, 0.28],
+        )
 
-    # Position Builder Histogram
-    fig.add_trace(
-        go.Bar(
-            x=df["timestamp"],
-            y=df["pos_builder"],
-            marker_color=df["color"],
-            name="Position Builder",
+        fig.add_trace(
+            go.Candlestick(
+                x=df["timestamp"],
+                open=df["open"],
+                high=df["high"],
+                low=df["low"],
+                close=df["close"],
+                name="Nifty 50 Spot",
+                increasing_line_color="#10b981",
+                decreasing_line_color="#ef4444",
+                increasing_fillcolor="#10b981",
+                decreasing_fillcolor="#ef4444",
+            ),
+            row=1,
+            col=1,
+        )
+
+        fig.add_trace(
+            go.Bar(
+                x=df["timestamp"],
+                y=df["pos_builder"],
+                marker_color=df["color"],
+                name="Position Builder",
+                showlegend=False,
+            ),
+            row=2,
+            col=1,
+        )
+
+        fig.update_layout(
+            template="plotly_dark",
+            paper_bgcolor="#0c0e12",
+            plot_bgcolor="#0c0e12",
+            margin=dict(l=10, r=40, t=10, b=10),
+            height=650,
+            xaxis_rangeslider_visible=False,
+            hovermode="x unified",
             showlegend=False,
-        ),
-        row=2,
-        col=1,
-    )
+        )
 
-    fig.update_layout(
-        template="plotly_dark",
-        paper_bgcolor="#0c0e12",
-        plot_bgcolor="#0c0e12",
-        margin=dict(l=10, r=40, t=10, b=10),
-        height=650,
-        xaxis_rangeslider_visible=False,
-        hovermode="x unified",
-        showlegend=False,
-    )
+        fig.update_xaxes(
+            showgrid=True,
+            gridcolor="#1f2937",
+            color="#9ca3af",
+            tickformat="%H:%M",
+            type="date",
+            row=2,
+            col=1,
+        )
 
-    fig.update_xaxes(
-        showgrid=True,
-        gridcolor="#1f2937",
-        color="#9ca3af",
-        tickformat="%H:%M",
-        type="date",
-        row=2,
-        col=1,
-    )
+        fig.update_yaxes(
+            showgrid=True,
+            gridcolor="#1f2937",
+            color="#9ca3af",
+            side="right",
+            row=1,
+            col=1,
+        )
 
-    fig.update_yaxes(
-        showgrid=True,
-        gridcolor="#1f2937",
-        color="#9ca3af",
-        side="right",
-        row=1,
-        col=1,
-    )
+        fig.update_yaxes(
+            showgrid=False,
+            side="right",
+            zeroline=True,
+            zerolinecolor="#374151",
+            row=2,
+            col=1,
+        )
 
-    fig.update_yaxes(
-        showgrid=False,
-        side="right",
-        zeroline=True,
-        zerolinecolor="#374151",
-        row=2,
-        col=1,
-    )
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.error("Unable to load session data.")
 
-    st.plotly_chart(fig, use_container_width=True)
-else:
-    st.error("Unable to load session data. Check Upstox Access Token.")
+
+# Execute live update wrapper
+render_live_chart(tf_option, strike_count, expiry_input)
