@@ -1,3 +1,4 @@
+import concurrent.futures
 from datetime import datetime
 import pandas as pd
 import plotly.graph_objects as go
@@ -5,158 +6,282 @@ from plotly.subplots import make_subplots
 import requests
 import streamlit as st
 
-st.set_page_config(layout="wide", page_title="Live Nifty 50 Chart")
+st.set_page_config(layout="wide", page_title="Live Options Apex - Multi-Strike")
+
+# User Token
+UPSTOX_TOKEN = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2M0FZSEUiLCJqdGkiOiI2YThkNTc1Y2Y4MTJmNjA0MzcxZDNlM2MiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc4NzY0NzgzNiwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzg3Njk1MjAwfQ.Z4zP9w3MecFeZEcX5sUt4YdhxS6skp25fbKOv8-_gPU"
+SPOT_KEY = "NSE_INDEX|Nifty 50"
+
 
 # ==========================================
-# 1. UPSTOX LIVE DATA FETCHING
+# 1. UPSTOX LIVE API INTEGRATION
 # ==========================================
-def fetch_live_upstox_ohlc(instrument_key, interval, api_token):
-    """Fetches actual live intraday OHLC candles directly from Upstox API."""
-    # Convert Streamlit timeframe label to Upstox API format
-    upstox_interval = "1minute" if interval == "1min" else ("3minute" if interval == "3min" else "5minute")
-    
-    # Endpoint for today's intraday data
-    url = f"https://api.upstox.com/v2/historical-candle/intraday/{instrument_key}/{upstox_interval}"
+def fetch_upstox_intraday_ohlc(instrument_key, interval="3minute"):
+    """Fetches real intraday candle data strictly up to current timestamp."""
+    url = f"https://api.upstox.com/v2/historical-candle/intraday/{instrument_key}/{interval}"
     headers = {
         "Accept": "application/json",
-        "Authorization": f"Bearer {api_token}",
+        "Authorization": f"Bearer {UPSTOX_TOKEN}",
     }
 
     try:
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code == 200:
-            res_data = response.json()
-            candles = res_data.get("data", {}).get("candles", [])
-            
+        res = requests.get(url, headers=headers, timeout=6)
+        if res.status_code == 200:
+            candles = res.json().get("data", {}).get("candles", [])
             if not candles:
-                st.error("Upstox returned empty candle data. Check if market is active or token is valid.")
                 return pd.DataFrame()
 
-            # Upstox returns: [timestamp, open, high, low, close, volume, open_interest]
             df = pd.DataFrame(
                 candles,
-                columns=["timestamp", "open", "high", "low", "close", "vol", "oi"]
+                columns=[
+                    "timestamp",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "vol",
+                    "oi",
+                ],
             )
             df["timestamp"] = pd.to_datetime(df["timestamp"])
-            
-            # Sort chronologically (Upstox returns newest first)
-            df = df.sort_values("timestamp").reset_index(drop=True)
-            return df
+
+            # Strict filter up to current system time (No future candles)
+            df = df[df["timestamp"] <= pd.Timestamp.now()]
+            return df.sort_values("timestamp").reset_index(drop=True)
         else:
-            st.error(f"Upstox API Error [{response.status_code}]: {response.text}")
-            return pd.DataFrame()
-            
+            st.error(f"API Request Failed [{res.status_code}]: {res.text}")
     except Exception as e:
-        st.error(f"Connection Error: {str(e)}")
+        st.error(f"Upstox Request Error: {e}")
+
+    return pd.DataFrame()
+
+
+def fetch_option_chain(spot_key, expiry_date):
+    """Fetches Option Chain to identify current ATM and nearby Option Keys."""
+    url = f"https://api.upstox.com/v2/option/chain?instrument_key={spot_key}&expiry_date={expiry_date}"
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {UPSTOX_TOKEN}",
+    }
+
+    try:
+        res = requests.get(url, headers=headers, timeout=6)
+        if res.status_code == 200:
+            return res.json().get("data", [])
+    except Exception:
+        pass
+    return []
+
+
+def fetch_strike_oi_parallel(keys, interval):
+    """Fetches OI changes concurrently across multiple strike keys."""
+
+    def worker(key):
+        df = fetch_upstox_intraday_ohlc(key, interval)
+        if not df.empty:
+            df["oi_diff"] = df["oi"].diff().fillna(0)
+            return df[["timestamp", "oi_diff"]]
         return pd.DataFrame()
 
-# ==========================================
-# 2. STREAMLIT UI CONTROLS
-# ==========================================
-st.title("Nifty 50 - Realtime Market Data")
+    results = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        futures = [executor.submit(worker, k) for k in keys]
+        for f in concurrent.futures.as_completed(futures):
+            res = f.result()
+            if not res.empty:
+                results.append(res)
 
-col_token, col_tf, col_btn = st.columns([6, 2, 2])
+    if results:
+        return (
+            pd.concat(results).groupby("timestamp", as_index=False)["oi_diff"].sum()
+        )
+    return pd.DataFrame()
 
-with col_token:
-    api_token = st.text_input("Upstox Bearer Access Token", type="password")
+
+def build_options_apex_dataset(interval, num_strikes, expiry_date):
+    # Fetch Nifty Spot Candles
+    df_spot = fetch_upstox_intraday_ohlc(SPOT_KEY, interval)
+
+    if df_spot.empty:
+        st.warning(
+            "Could not fetch Nifty 50 Spot data. Verify token status or market hours."
+        )
+        return pd.DataFrame()
+
+    # Get Option chain to isolate strikes around ATM
+    chain = fetch_option_chain(SPOT_KEY, expiry_date)
+    if not chain:
+        # Fallback: Render Nifty spot candles with Price Momentum if chain expiry date is invalid
+        df_spot["pos_builder"] = (df_spot["close"] - df_spot["open"]) * 100
+        df_spot["color"] = df_spot["pos_builder"].apply(
+            lambda x: "#10b981" if x >= 0 else "#ef4444"
+        )
+        return df_spot
+
+    chain = sorted(chain, key=lambda x: x.get("strike_price", 0))
+    spot_price = df_spot["close"].iloc[-1]
+
+    closest_idx = min(
+        range(len(chain)),
+        key=lambda i: abs(chain[i]["strike_price"] - spot_price),
+    )
+
+    start_i = max(0, closest_idx - num_strikes)
+    end_i = min(len(chain), closest_idx + num_strikes + 1)
+    selected = chain[start_i:end_i]
+
+    call_keys = [
+        item["call_options"]["instrument_key"]
+        for item in selected
+        if "call_options" in item
+    ]
+    put_keys = [
+        item["put_options"]["instrument_key"]
+        for item in selected
+        if "put_options" in item
+    ]
+
+    df_calls = fetch_strike_oi_parallel(call_keys, interval)
+    df_puts = fetch_strike_oi_parallel(put_keys, interval)
+
+    if df_calls.empty or df_puts.empty:
+        df_spot["pos_builder"] = (df_spot["close"] - df_spot["open"]) * 100
+        df_spot["color"] = df_spot["pos_builder"].apply(
+            lambda x: "#10b981" if x >= 0 else "#ef4444"
+        )
+        return df_spot
+
+    # Consolidate Net Multi-Strike Position Builder: Put Delta OI - Call Delta OI
+    merged = pd.merge(df_spot, df_calls.rename(columns={"oi_diff": "call_oi_diff"}), on="timestamp", how="inner")
+    merged = pd.merge(merged, df_puts.rename(columns={"oi_diff": "put_oi_diff"}), on="timestamp", how="inner")
+
+    merged["pos_builder"] = merged["put_oi_diff"] - merged["call_oi_diff"]
+    merged["color"] = merged["pos_builder"].apply(
+        lambda x: "#10b981" if x >= 0 else "#ef4444"
+    )
+
+    return merged
+
+
+# ==========================================
+# 2. STREAMLIT INTERFACE
+# ==========================================
+col_title, col_tf, col_strikes, col_exp = st.columns([4, 2, 2, 2])
+
+with col_title:
+    st.markdown("### **Nifty 50 - Multi-Strike Apex**")
 
 with col_tf:
-    timeframe = st.selectbox("Timeframe", options=["1min", "3min", "5min"], index=2)
+    tf_option = st.selectbox(
+        "Timeframe",
+        options=["3minute", "5minute", "1minute"],
+        index=0,
+        label_visibility="collapsed",
+    )
 
-with col_btn:
-    st.write("")
-    st.write("")
-    refresh = st.button("Refresh Live Chart")
+with col_strikes:
+    strike_count = st.selectbox(
+        "Strikes Range",
+        options=[3, 5, 10],
+        index=1,
+        label_visibility="collapsed",
+    )
 
-# Instrument key for Nifty 50 Index
-SPOT_KEY = "NSE_INDEX|Nifty 50"
+with col_exp:
+    expiry_input = st.date_input(
+        "Expiry",
+        value=datetime.now(),
+        label_visibility="collapsed",
+    )
 
-if api_token:
-    df = fetch_live_upstox_ohlc(SPOT_KEY, timeframe, api_token)
+# Fetch Data
+df = build_options_apex_dataset(
+    tf_option, strike_count, expiry_input.strftime("%Y-%m-%d")
+)
 
-    if not df.empty:
-        # Calculate Delta Changes for Histogram (Position Indicators)
-        df["close_diff"] = df["close"] - df["open"]
-        df["bar_color"] = df["close_diff"].apply(lambda x: "#10b981" if x >= 0 else "#ef4444")
+# ==========================================
+# 3. PLOTLY CHART ENGINE
+# ==========================================
+if not df.empty:
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.02,
+        row_heights=[0.75, 0.25],
+    )
 
-        # ==========================================
-        # 3. PLOTLY CHART ENGINE
-        # ==========================================
-        fig = make_subplots(
-            rows=2,
-            cols=1,
-            shared_xaxes=True,
-            vertical_spacing=0.02,
-            row_heights=[0.75, 0.25],
-        )
+    # Spot Candlestick
+    fig.add_trace(
+        go.Candlestick(
+            x=df["timestamp"],
+            open=df["open"],
+            high=df["high"],
+            low=df["low"],
+            close=df["close"],
+            name="Nifty 50",
+            increasing_line_color="#10b981",
+            decreasing_line_color="#ef4444",
+            increasing_fillcolor="#10b981",
+            decreasing_fillcolor="#ef4444",
+        ),
+        row=1,
+        col=1,
+    )
 
-        # Candlesticks
-        fig.add_trace(
-            go.Candlestick(
-                x=df["timestamp"],
-                open=df["open"],
-                high=df["high"],
-                low=df["low"],
-                close=df["close"],
-                name="Nifty 50",
-                increasing_line_color="#10b981",
-                decreasing_line_color="#ef4444",
-                increasing_fillcolor="#10b981",
-                decreasing_fillcolor="#ef4444",
-            ),
-            row=1,
-            col=1,
-        )
-
-        # Volume / Bar Indicator
-        fig.add_trace(
-            go.Bar(
-                x=df["timestamp"],
-                y=df["vol"] if df["vol"].sum() > 0 else df["close_diff"].abs(),
-                marker_color=df["bar_color"],
-                name="Volume / Momentum",
-                showlegend=False,
-            ),
-            row=2,
-            col=1,
-        )
-
-        fig.update_layout(
-            template="plotly_dark",
-            paper_bgcolor="#0c0e12",
-            plot_bgcolor="#0c0e12",
-            margin=dict(l=10, r=50, t=10, b=10),
-            height=650,
-            xaxis_rangeslider_visible=False,
-            hovermode="x unified",
+    # Multi-Strike Net OI Change (Position Builder)
+    fig.add_trace(
+        go.Bar(
+            x=df["timestamp"],
+            y=df["pos_builder"],
+            marker_color=df["color"],
+            name="Position Builder (Put ΔOI - Call ΔOI)",
             showlegend=False,
-        )
+        ),
+        row=2,
+        col=1,
+    )
 
-        fig.update_xaxes(
-            showgrid=True,
-            gridcolor="#1f2937",
-            color="#9ca3af",
-            tickformat="%H:%M",
-            row=2,
-            col=1,
-        )
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor="#0c0e12",
+        plot_bgcolor="#0c0e12",
+        margin=dict(l=10, r=40, t=10, b=10),
+        height=650,
+        xaxis_rangeslider_visible=False,
+        hovermode="x unified",
+        showlegend=False,
+    )
 
-        fig.update_yaxes(
-            showgrid=True,
-            gridcolor="#1f2937",
-            color="#9ca3af",
-            side="right",
-            row=1,
-            col=1,
-        )
+    fig.update_xaxes(
+        showgrid=True,
+        gridcolor="#1f2937",
+        color="#9ca3af",
+        tickformat="%H:%M",
+        range=[
+            df["timestamp"].min() - pd.Timedelta(minutes=5),
+            df["timestamp"].max() + pd.Timedelta(minutes=5),
+        ],
+        row=2,
+        col=1,
+    )
 
-        fig.update_yaxes(
-            showgrid=False,
-            side="right",
-            row=2,
-            col=1,
-        )
+    fig.update_yaxes(
+        showgrid=True,
+        gridcolor="#1f2937",
+        color="#9ca3af",
+        side="right",
+        row=1,
+        col=1,
+    )
 
-        st.plotly_chart(fig, use_container_width=True)
-else:
-    st.info("Please enter your active Upstox Access Token above to fetch live market candles.")
+    fig.update_yaxes(
+        showgrid=False,
+        side="right",
+        zeroline=True,
+        zerolinecolor="#374151",
+        row=2,
+        col=1,
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
