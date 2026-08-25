@@ -18,7 +18,6 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-        /* Fix page scrolling while allowing dropdown popovers to overflow without clipping */
         html, body {
             overflow: hidden !important;
             background-color: #0b0e14;
@@ -41,12 +40,10 @@ st.markdown(
             gap: 0.15rem !important;
         }
 
-        /* Ensure BaseWeb Select popover dropdowns display above Plotly canvas */
         div[data-baseweb="popover"], div[data-baseweb="menu"] {
             z-index: 999999 !important;
         }
         
-        /* Selectbox styling to match dark theme */
         div[data-baseweb="select"] > div {
             background-color: #161b22 !important;
             border: 1px solid #2d333b !important;
@@ -66,7 +63,6 @@ st.markdown(
             background-color: #161b22 !important;
         }
 
-        /* Inline Top Header Bar */
         .header-title {
             color: #ffffff;
             font-size: 20px;
@@ -273,7 +269,7 @@ def build_options_apex_dataset(timeframe, num_strikes, selected_expiry):
 
 
 # ==========================================
-# 2. HEADER & DROPDOWNS BAR (ORIGINAL STYLING)
+# 2. HEADER & DROPDOWNS BAR
 # ==========================================
 hdr_col1, hdr_col2, hdr_col3, hdr_col4 = st.columns([4, 1.2, 1.2, 1.6])
 
@@ -292,7 +288,7 @@ with hdr_col2:
     tf_option = st.selectbox(
         "Timeframe",
         options=["3min", "5min"],
-        index=0,  # Default: 3min
+        index=0,
         key="tf_select",
         label_visibility="collapsed",
     )
@@ -301,7 +297,7 @@ with hdr_col3:
     strike_count = st.selectbox(
         "Strikes",
         options=[3, 5, 10],
-        index=0,  # Default: 3
+        index=0,
         key="strike_select",
         label_visibility="collapsed",
     )
@@ -325,7 +321,6 @@ def render_live_chart(tf, count, expiry):
     df = build_options_apex_dataset(tf, count, expiry)
 
     if not df.empty:
-        # Create dual-panel subplot layout
         fig = make_subplots(
             rows=2,
             cols=1,
@@ -334,7 +329,7 @@ def render_live_chart(tf, count, expiry):
             row_heights=[0.74, 0.26],
         )
 
-        # Main Candlestick Chart
+        # Main Candlestick Chart (OHLC box hidden; only time displayed)
         fig.add_trace(
             go.Candlestick(
                 x=df["timestamp"],
@@ -342,11 +337,12 @@ def render_live_chart(tf, count, expiry):
                 high=df["high"],
                 low=df["low"],
                 close=df["close"],
-                name="Nifty 50",
+                name="",
                 increasing_line_color="#089981",
                 decreasing_line_color="#f23645",
                 increasing_fillcolor="#089981",
                 decreasing_fillcolor="#f23645",
+                hovertemplate="%{x|%I:%M %p}<extra></extra>",  # Displays ONLY time
             ),
             row=1,
             col=1,
@@ -359,14 +355,15 @@ def render_live_chart(tf, count, expiry):
                 y=df["pos_builder"],
                 marker_color=df["color"],
                 marker_line_width=0,
-                name="Position Builder",
+                name="",
                 opacity=0.85,
+                hovertemplate="%{x|%I:%M %p}<extra></extra>",  # Displays ONLY time
             ),
             row=2,
             col=1,
         )
 
-        # Figure Layout Configuration
+        # Layout Config
         fig.update_layout(
             template="plotly_dark",
             paper_bgcolor="#0b0e14",
@@ -375,14 +372,14 @@ def render_live_chart(tf, count, expiry):
             height=580,
             dragmode="pan",
             xaxis_rangeslider_visible=False,
-            hovermode="x unified",
+            hovermode="x",  # Standard unified crosshair cursor hover mode
             showlegend=False,
         )
 
-        # Single Continuous Crosshair Configuration
+        # Single Continuous Merged Crosshair Config (Top to Bottom)
         spike_config = dict(
             showspikes=True,
-            spikemode="across+marker",
+            spikemode="across",
             spikecolor="#787b86",
             spikethickness=1,
             spikedash="dash",
@@ -413,7 +410,7 @@ def render_live_chart(tf, count, expiry):
             **spike_config,
         )
 
-        # Lower X-Axis (12-Hour AM/PM Time Format like original chart)
+        # Lower X-Axis
         fig.update_xaxes(
             showgrid=True,
             gridcolor="#1e222d",
@@ -426,7 +423,7 @@ def render_live_chart(tf, count, expiry):
             **spike_config,
         )
 
-        # Lower Y-Axis Scale Normalization
+        # Lower Y-Axis Scale
         if len(df) > 2:
             scaled_max = df["pos_builder"].abs().quantile(0.98)
             if scaled_max > 0:
