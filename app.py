@@ -274,7 +274,7 @@ with c2:
 
 with c3:
     strike_count = st.selectbox(
-        "Strike Range", options=[3, 5, 10], index=1, key="strike_select"
+        "Strike Range", options=[3, 3, 10], index=1, key="strike_select"
     )
 
 with c4:
