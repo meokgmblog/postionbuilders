@@ -342,7 +342,7 @@ def render_live_chart(tf, count, expiry):
             cols=1,
             shared_xaxes=True,
             vertical_spacing=0.03,
-            row_heights=[0.65, 0.35],
+            row_heights=[0.65, 0.45],
         )
 
         # Candlestick
@@ -383,7 +383,7 @@ def render_live_chart(tf, count, expiry):
             paper_bgcolor="#131722",
             plot_bgcolor="#131722",
             margin=dict(l=10, r=60, t=10, b=10),
-            height=680,
+            height=510,
             dragmode="pan",  # Defaults drag to pan/scroll instead of zoom box
             xaxis_rangeslider_visible=False,
             hovermode="x unified",
