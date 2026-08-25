@@ -314,7 +314,7 @@ with hdr_col4:
 
 
 # ==========================================
-# 3. CHART RENDER ENGINE (TradingView Style Crosshair)
+# 3. TRADINGVIEW-STYLE CROSSHAIR RENDER ENGINE
 # ==========================================
 @st.fragment(run_every="180s")
 def render_live_chart(tf, count, expiry):
@@ -325,11 +325,11 @@ def render_live_chart(tf, count, expiry):
             rows=2,
             cols=1,
             shared_xaxes=True,
-            vertical_spacing=0.0,  # Zero spacing so crosshair line is continuous
+            vertical_spacing=0.0,  # Merges subplots seamlessly
             row_heights=[0.75, 0.25],
         )
 
-        # 1. Main Candlestick Chart
+        # 1. Main Candlestick Chart (No popups on hover)
         fig.add_trace(
             go.Candlestick(
                 x=df["timestamp"],
@@ -342,13 +342,13 @@ def render_live_chart(tf, count, expiry):
                 decreasing_line_color="#f23645",
                 increasing_fillcolor="#089981",
                 decreasing_fillcolor="#f23645",
-                hoverinfo="none",  # Suppresses all mid-screen hover popups
+                hoverinfo="skip",  # Removes candle details popup
             ),
             row=1,
             col=1,
         )
 
-        # 2. Lower Position Builder Histogram
+        # 2. Lower Position Builder Histogram (No popups on hover)
         fig.add_trace(
             go.Bar(
                 x=df["timestamp"],
@@ -357,23 +357,23 @@ def render_live_chart(tf, count, expiry):
                 marker_line_width=0,
                 name="",
                 opacity=0.85,
-                hoverinfo="none",  # Suppresses lower trace hover popups
+                hoverinfo="skip",  # Removes bar details popup
             ),
             row=2,
             col=1,
         )
 
-        # Unified Spike Crosshair Settings
+        # Single Continuous Crosshair Configuration
         spike_config = dict(
             showspikes=True,
-            spikemode="across+toaxis",
+            spikemode="across",
             spikecolor="#8a8a8a",
             spikethickness=1,
             spikedash="dash",
             spikesnap="cursor",
         )
 
-        # 3. Configure Upper Row (Price)
+        # Upper X-Axis Settings
         fig.update_xaxes(
             showgrid=True,
             gridcolor="#1e222d",
@@ -384,6 +384,7 @@ def render_live_chart(tf, count, expiry):
             **spike_config,
         )
 
+        # Upper Y-Axis Settings (Price Axis)
         fig.update_yaxes(
             showgrid=True,
             gridcolor="#1e222d",
@@ -396,12 +397,12 @@ def render_live_chart(tf, count, expiry):
             **spike_config,
         )
 
-        # 4. Configure Lower Row (Time Axis with Dark Pill Callout)
+        # Lower X-Axis Settings (TradingView Date/Time Pill Format)
         fig.update_xaxes(
             showgrid=True,
             gridcolor="#1e222d",
             color="#787b86",
-            tickformat="%H:%M",  # 24hr format or '%a %d %b \'%y  %H:%M' for full date
+            tickformat="%a %d %b '%y  %H:%M",
             type="date",
             rangebreaks=[dict(bounds=["sat", "mon"])],
             row=2,
@@ -409,6 +410,7 @@ def render_live_chart(tf, count, expiry):
             **spike_config,
         )
 
+        # Lower Y-Axis Scale
         if len(df) > 2:
             scaled_max = df["pos_builder"].abs().quantile(0.98)
             if scaled_max > 0:
@@ -430,7 +432,7 @@ def render_live_chart(tf, count, expiry):
             **spike_config,
         )
 
-        # Figure Layout & Hover Mode Configuration
+        # Global Layout Config
         fig.update_layout(
             template="plotly_dark",
             paper_bgcolor="#0b0e14",
@@ -460,6 +462,10 @@ def render_live_chart(tf, count, expiry):
     else:
         st.error(
             "Unable to fetch market data. Please verify your connection."
+        )
+
+
+render_live_chart(tf_option, strike_count, expiry_input)
         )
 
 
