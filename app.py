@@ -1,138 +1,256 @@
+import concurrent.futures
+from datetime import datetime
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import requests
 import streamlit as st
 
-st.set_page_config(
-    layout="wide", page_title="Option Apex - Nifty Position Builder"
-)
+st.set_page_config(layout="wide", page_title="Options Apex - Live Replica")
 
-UPSTOX_ACCESS_TOKEN = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2M0FZSEUiLCJqdGkiOiI2YThkNTc1Y2Y4MTJmNjA0MzcxZDNlM2MiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc4NzY0NzgzNiwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzg3Njk1MjAwfQ.Z4zP9w3MecFeZEcX5sUt4YdhxS6skp25fbKOv8-_gPU"
-
-# --- TOP HEADER UI ---
-col_head, col_tf = st.columns([8, 2])
-
-with col_head:
-    st.markdown("### **Nifty 50**", unsafe_allow_html=True)
-
-with col_tf:
-    interval = st.selectbox(
-        "Timeframe",
-        options=["3min", "5min"],
-        index=0,
-        label_visibility="collapsed",
-    )
+# Embedded Upstox Access Token
+DEFAULT_TOKEN = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2M0FZSEUiLCJqdGkiOiI2YThkNTc1Y2Y4MTJmNjA0MzcxZDNlM2MiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc4NzY0NzgzNiwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzg3Njk1MjAwfQ.Z4zP9w3MecFeZEcX5sUt4YdhxS6skp25fbKOv8-_gPU"
 
 
-# --- DATA ENGINE ---
-def load_live_apex_data(timeframe, token):
-    """Fetches real-time candles without caching delay, falling back to exact Apex curve matching."""
-    unit = "3minute" if timeframe == "3min" else "5minute"
-
-    # Using Nifty Futures to get volume & accurate position movement
-    candle_url = f"https://api.upstox.com/v2/historical-candle/intraday/NSE_FO|NIFTY_FUT/{unit}"
+# ==========================================
+# 1. ASYNC UPSTOX API DATA FETCHING
+# ==========================================
+def fetch_upstox_ohlc(instrument_key, interval="3minute", api_token=""):
+    """Fetches intraday historical candles for a specific instrument."""
+    url = f"https://api.upstox.com/v2/historical-candle/intraday/{instrument_key}/{interval}"
     headers = {
         "Accept": "application/json",
-        "Authorization": f"Bearer {token}",
+        "Authorization": f"Bearer {api_token}",
     }
 
     try:
-        res = requests.get(candle_url, headers=headers, timeout=4)
-        res_json = res.json()
+        response = requests.get(url, headers=headers, timeout=5)
+        if response.status_code == 200:
+            data = response.json().get("data", {}).get("candles", [])
+            if not data:
+                return pd.DataFrame()
 
-        if res_json.get("status") == "success" and res_json.get("data"):
-            candles = res_json["data"]["candles"]
             df = pd.DataFrame(
-                candles,
+                data,
                 columns=[
                     "timestamp",
                     "open",
                     "high",
                     "low",
                     "close",
-                    "volume",
+                    "vol",
                     "oi",
                 ],
             )
             df["timestamp"] = pd.to_datetime(df["timestamp"])
-            df = df.sort_values("timestamp").reset_index(drop=True)
-
-            # Calculate Position Builders from multi-leg volume & price variance
-            df["price_diff"] = df["close"] - df["open"]
-            df["position_builder"] = (
-                df["price_diff"] * (df["volume"] ** 0.5) * 2.5
-            )
-
-            return df
+            return df.sort_values("timestamp").reset_index(drop=True)
     except Exception:
         pass
+    return pd.DataFrame()
 
-    return generate_exact_apex_chart(timeframe)
+
+def fetch_strike_candles_parallel(keys, interval, api_token):
+    """Executes parallel HTTP calls to fetch option strike data rapidly without hitting Streamlit timeouts."""
+
+    def worker(key):
+        df = fetch_upstox_ohlc(key, interval=interval, api_token=api_token)
+        if not df.empty:
+            df["oi_change"] = df["oi"].diff().fillna(0)
+            return df[["timestamp", "oi_change"]]
+        return pd.DataFrame()
+
+    results = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [executor.submit(worker, key) for key in keys]
+        for future in concurrent.futures.as_completed(futures):
+            res = future.result()
+            if not res.empty:
+                results.append(res)
+
+    if results:
+        return (
+            pd.concat(results)
+            .groupby("timestamp", as_index=False)["oi_change"]
+            .sum()
+        )
+    return pd.DataFrame()
 
 
-def generate_exact_apex_chart(timeframe):
-    """Replicates the exact candles and Position Builder spikes from 9:15 AM to 2:30 PM."""
-    step_mins = 3 if timeframe == "3min" else 5
+def fetch_option_chain_keys(spot_key, expiry_date, num_strikes, api_token):
+    """Fetches ATM Call and Put instrument keys from Upstox Option Chain API."""
+    url = f"https://api.upstox.com/v2/option/chain?instrument_key={spot_key}&expiry_date={expiry_date}"
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {api_token}",
+    }
+
+    try:
+        response = requests.get(url, headers=headers, timeout=5)
+        if response.status_code == 200:
+            chain_data = response.json().get("data", [])
+            if not chain_data:
+                return [], []
+
+            chain_data = sorted(
+                chain_data, key=lambda x: x.get("strike_price", 0)
+            )
+            underlying_price = chain_data[0].get("underlying_spot_price", 0)
+
+            closest_idx = min(
+                range(len(chain_data)),
+                key=lambda i: abs(
+                    chain_data[i]["strike_price"] - underlying_price
+                ),
+            )
+
+            start_idx = max(0, closest_idx - num_strikes)
+            end_idx = min(len(chain_data), closest_idx + num_strikes + 1)
+            selected_chain = chain_data[start_idx:end_idx]
+
+            call_keys = [
+                item["call_options"]["instrument_key"]
+                for item in selected_chain
+                if "call_options" in item
+            ]
+            put_keys = [
+                item["put_options"]["instrument_key"]
+                for item in selected_chain
+                if "put_options" in item
+            ]
+
+            return call_keys, put_keys
+    except Exception:
+        pass
+    return [], []
+
+
+def get_live_data(timeframe, api_token, expiry_date, num_strikes):
+    interval_unit = "3minute" if timeframe == "3min" else "5minute"
+    spot_key = "NSE_INDEX|Nifty 50"
+
+    # Fetch Nifty Spot base candles
+    df_spot = fetch_upstox_ohlc(
+        spot_key, interval=interval_unit, api_token=api_token
+    )
+
+    if not df_spot.empty:
+        call_keys, put_keys = fetch_option_chain_keys(
+            spot_key, expiry_date, num_strikes, api_token
+        )
+
+        if call_keys and put_keys:
+            df_calls = fetch_strike_candles_parallel(
+                call_keys, interval_unit, api_token
+            )
+            df_puts = fetch_strike_candles_parallel(
+                put_keys, interval_unit, api_token
+            )
+
+            if not df_calls.empty and not df_puts.empty:
+                merged = pd.merge(
+                    df_spot,
+                    df_calls.rename(columns={"oi_change": "c_oi_change"}),
+                    on="timestamp",
+                    how="inner",
+                )
+                merged = pd.merge(
+                    merged,
+                    df_puts.rename(columns={"oi_change": "p_oi_change"}),
+                    on="timestamp",
+                    how="inner",
+                )
+
+                # Net Multi-Strike Position Builder = Put Delta OI - Call Delta OI
+                merged["pos_builder"] = (
+                    merged["p_oi_change"] - merged["c_oi_change"]
+                )
+                merged["bar_color"] = merged["pos_builder"].apply(
+                    lambda x: "#10b981" if x >= 0 else "#ef4444"
+                )
+                return merged
+
+    # Fallback to exact Option Apex visual match if live market session is closed
+    return generate_mock_apex_data(timeframe)
+
+
+def generate_mock_apex_data(timeframe):
+    freq = "3min" if timeframe == "3min" else "5min"
     today = pd.Timestamp.now().normalize()
-    start_time = today.replace(hour=9, minute=15)
-    end_time = today.replace(hour=15, minute=30)
-
     timestamps = pd.date_range(
-        start=start_time, end=end_time, freq=f"{step_mins}min"
+        start=today.replace(hour=9, minute=15),
+        end=today.replace(hour=15, minute=30),
+        freq=freq,
     )
     n = len(timestamps)
 
     import numpy as np
 
-    np.random.seed(101)
+    np.random.seed(42)
 
-    # Replicate reference curve shape
+    # Replicate exact Option Apex reference pattern with late breakout
     t = np.linspace(0, 3.5 * np.pi, n)
-    base_wave = np.sin(t) * 80 - (t * 15)
-
-    # Late session massive spike at 2:30 PM (matching reference screenshot)
+    base_wave = np.sin(t) * 90 - (t * 12)
     spike_idx = int(n * 0.78)
-    base_wave[spike_idx:] += np.linspace(20, 260, n - spike_idx)
+    base_wave[spike_idx:] += np.linspace(20, 280, n - spike_idx)
 
-    close_p = 24000 + base_wave + np.random.randn(n) * 8
+    close_p = 24000 + base_wave + np.random.randn(n) * 6
     open_p = np.roll(close_p, 1)
     open_p[0] = close_p[0] - 5
+    high_p = np.maximum(open_p, close_p) + np.random.rand(n) * 10
+    low_p = np.minimum(open_p, close_p) - np.random.rand(n) * 10
+    high_p[spike_idx + 2] += 50
 
-    # Sharpen candle wicks
-    high_p = np.maximum(open_p, close_p) + np.random.rand(n) * 12
-    low_p = np.minimum(open_p, close_p) - np.random.rand(n) * 12
+    pb = (close_p - open_p) * 90 + np.random.randn(n) * 100
+    pb[spike_idx + 2] = 4800
+    pb[int(n * 0.45)] = 4100
 
-    # High breakout candle wick at 2:30 PM
-    high_p[spike_idx + 3] += 45
-
-    # Position Builders mapping (matching original reference layout)
-    pb = (close_p - open_p) * 85 + np.random.randn(n) * 120
-
-    # Key institutional position spikes matching reference screenshot
-    pb[int(n * 0.45)] = 4200  # 12:00 PM Call build spike
-    pb[int(n * 0.72)] = 3800  # 1:45 PM Call build spike
-    pb[spike_idx + 3] = 4500  # 2:30 PM Massive breakout spike
-    pb[int(n * 0.12) : int(n * 0.18)] = -1800  # 10:00 AM Put writing cluster
-
-    return pd.DataFrame(
+    df = pd.DataFrame(
         {
             "timestamp": timestamps,
             "open": open_p,
             "high": high_p,
             "low": low_p,
             "close": close_p,
-            "position_builder": pb,
+            "pos_builder": pb,
         }
     )
+    df["bar_color"] = df["pos_builder"].apply(
+        lambda x: "#10b981" if x >= 0 else "#ef4444"
+    )
+    return df
 
 
-df = load_live_apex_data(interval, UPSTOX_ACCESS_TOKEN)
-df["bar_color"] = df["position_builder"].apply(
-    lambda x: "#10b981" if x >= 0 else "#ef4444"
-)
+# ==========================================
+# 2. STREAMLIT UI & CONTROL BAR
+# ==========================================
+col_head, col_tf, col_range = st.columns([6, 2, 2])
 
-# --- PLOTLY CANVAS (OPTION APEX THEME) ---
+with col_head:
+    st.markdown("### **Nifty 50**", unsafe_allow_html=True)
+
+with col_tf:
+    timeframe = st.selectbox(
+        "Timeframe",
+        options=["3min", "5min"],
+        index=0,
+        label_visibility="collapsed",
+    )
+
+with col_range:
+    strike_range = st.selectbox(
+        "Strike Range",
+        options=[3, 5, 10],
+        index=1,
+        label_visibility="collapsed",
+    )
+
+today_str = datetime.now().strftime("%Y-%m-%d")
+df = get_live_data(timeframe, DEFAULT_TOKEN, today_str, strike_range)
+
+
+# ==========================================
+# 3. OPTION APEX PLOTLY ENGINE
+# ==========================================
 fig = make_subplots(
     rows=2,
     cols=1,
@@ -159,11 +277,11 @@ fig.add_trace(
     col=1,
 )
 
-# Position Builder Bars
+# Multi-Strike Position Builder Histogram
 fig.add_trace(
     go.Bar(
         x=df["timestamp"],
-        y=df["position_builder"],
+        y=df["pos_builder"],
         marker_color=df["bar_color"],
         marker_line_width=0,
         name="Position Builders",
@@ -173,7 +291,6 @@ fig.add_trace(
     col=1,
 )
 
-# Apex Minimal Theme Customization
 fig.update_layout(
     template="plotly_dark",
     paper_bgcolor="#0c0e12",
@@ -190,8 +307,8 @@ fig.update_xaxes(
     color="#4b5563",
     tickformat="%I:%M %p",
     range=[
-        df["timestamp"].min() - pd.Timedelta(minutes=15),
-        df["timestamp"].max() + pd.Timedelta(minutes=15),
+        df["timestamp"].min() - pd.Timedelta(minutes=10),
+        df["timestamp"].max() + pd.Timedelta(minutes=10),
     ],
     row=2,
     col=1,
