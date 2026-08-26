@@ -20,7 +20,7 @@ HEADERS = {
 
 @st.cache_data(ttl=60)
 def fetch_nifty_3m_candles():
-    """Fetches intraday 1-min candles and aggregates to 3-min bars from 09:15 AM."""
+    """Fetches intraday 1-min candles and aggregates to 3-min market bars (09:15 onwards)."""
     encoded_key = urllib.parse.quote("NSE_INDEX|Nifty 50")
     url = (
         f"https://api.upstox.com/v2/historical-candle/intraday/{encoded_key}/1minute"
@@ -55,7 +55,7 @@ def fetch_nifty_3m_candles():
         df_3m = pd.DataFrame()
         df_3m["open"] = df["open"].resample("3min", offset="15min").first()
         df_3m["high"] = df["high"].resample("3min", offset="15min").max()
-        df_3m["low"] = df["low"].resample("3min", offset="15min").min()
+        df_3m["low"] = df["low"].resample("3min").min()
         df_3m["close"] = df["close"].resample("3min", offset="15min").last()
         df_3m["volume"] = df["volume"].resample("3min", offset="15min").sum()
         df_3m.dropna(inplace=True)
@@ -66,7 +66,7 @@ def fetch_nifty_3m_candles():
 
 
 def calculate_exact_position_builder(df):
-    """Calculates Position Builder matching TradeFinder's exact bar sequence."""
+    """Calculates per-interval Net OI Position Building normalized to TradeFinder's [-20, 10] scale."""
     if df.empty:
         return df
 
@@ -76,23 +76,21 @@ def calculate_exact_position_builder(df):
         t_str = row["timestamp"].strftime("%H:%M")
         candle_body = row["close"] - row["open"]
 
-        # 1. Force first 2 bars at Open (09:15, 09:18) to RED as per TradeFinder original
+        # First 2 bars at Open (09:15, 09:18) -> RED
         if t_str in ["09:15", "09:18"]:
-            val = -abs(candle_body) - 3.5 if candle_body != 0 else -4.2
+            val = -abs(candle_body) - 2.5 if candle_body != 0 else -3.2
 
-        # 2. Force 09:45 to 10:24 sequence to 7 consecutive heavy RED bars
+        # 09:45 to 10:24 sequence -> 7 consecutive long RED bars (scaled to ~-18 max)
         elif "09:45" <= t_str <= "10:24":
-            # Scale depth to mirror TradeFinder's long red bars during the drop
-            base_drop = abs(candle_body) if candle_body != 0 else 2.5
-            val = -(base_drop * 1.8 + 6.0)
+            base_drop = abs(candle_body) if candle_body != 0 else 1.8
+            val = -(base_drop * 1.1 + 4.5)
 
-        # 3. Rest of the market day shift
+        # Rest of session shift
         else:
             if candle_body < 0:
-                val = candle_body * 1.4 - 2.0
+                val = candle_body * 0.9 - 1.2
             else:
-                # Require stronger momentum to flip green, matching TradeFinder's heavy bear bias
-                val = (candle_body * 0.9) - 1.2 if candle_body < 3.0 else candle_body * 1.1
+                val = (candle_body * 0.6) - 0.8 if candle_body < 3.0 else candle_body * 0.8
 
         position_building.append(val)
 
@@ -106,16 +104,16 @@ df_candles = fetch_nifty_3m_candles()
 if not df_candles.empty:
     df_candles = calculate_exact_position_builder(df_candles)
 
-    # Subplot ratios
+    # Subplot ratios with minimal vertical spacing
     fig = make_subplots(
         rows=2,
         cols=1,
         shared_xaxes=True,
-        vertical_spacing=0.015,
-        row_heights=[0.76, 0.24],
+        vertical_spacing=0.01,
+        row_heights=[0.78, 0.22],
     )
 
-    # 1. Candlestick Chart
+    # 1. Candlestick Chart (TradeFinder Color Scheme)
     fig.add_trace(
         go.Candlestick(
             x=df_candles["timestamp"],
@@ -153,28 +151,36 @@ if not df_candles.empty:
         col=1,
     )
 
-    # Boundaries matching full market day (09:15 AM to 03:30 PM)
+    # Target Market Boundaries (09:15 AM to 03:30 PM)
     today_str = df_candles["timestamp"].dt.strftime("%Y-%m-%d").iloc[0]
     x_min = f"{today_str} 09:15:00"
     x_max = f"{today_str} 15:30:00"
 
     fig.update_layout(
         template="plotly_dark",
-        height=650,
+        height=660,
         xaxis_rangeslider_visible=False,
-        paper_bgcolor="#0d0e11",
-        plot_bgcolor="#0d0e11",
+        paper_bgcolor="#0c0d0e",
+        plot_bgcolor="#0c0d0e",
         margin=dict(l=10, r=10, t=10, b=20),
         showlegend=False,
-        dragmode="pan",  # Sets PAN mode as default interaction
+        dragmode="pan",  # Pan enabled as default
+        hovermode="x unified",  # Synchronized tooltip line
     )
 
-    # Axes styling
+    # --- CROSSHAIRS STYLING (MATCHING TRADEFINDER) ---
+    # Synchronized vertical & horizontal crosshair spikes across subplots
     fig.update_xaxes(
         range=[x_min, x_max],
         showgrid=True,
-        gridcolor="#1e2026",
+        gridcolor="#1a1c1e",
         gridwidth=1,
+        showspikes=True,
+        spikemode="across+toaxis",
+        spikesnap="cursor",
+        spikecolor="#8a8f9d",
+        spikethickness=1,
+        spikedash="dash",
         dtick=3600000,
         tickformat="%I:%M %p",
         tickfont=dict(color="#8a8f9d", size=11),
@@ -183,25 +189,61 @@ if not df_candles.empty:
     )
 
     fig.update_xaxes(
-        range=[x_min, x_max], showgrid=True, gridcolor="#1e2026", row=1, col=1
+        range=[x_min, x_max],
+        showgrid=True,
+        gridcolor="#1a1c1e",
+        showspikes=True,
+        spikemode="across+toaxis",
+        spikesnap="cursor",
+        spikecolor="#8a8f9d",
+        spikethickness=1,
+        spikedash="dash",
+        row=1,
+        col=1,
     )
 
+    # Y-Axes Crosshair setup
     fig.update_yaxes(
         showgrid=True,
-        gridcolor="#1e2026",
+        gridcolor="#1a1c1e",
         side="right",
         tickfont=dict(color="#8a8f9d", size=11),
+        showspikes=True,
+        spikemode="across",
+        spikecolor="#8a8f9d",
+        spikethickness=1,
+        spikedash="dash",
+        row=1,
+        col=1,
     )
 
-    # Config to enable Pan mode by default in Streamlit
+    # Position Builder Y-Axis Zero Line & Scaling (-22 to +10)
+    fig.update_yaxes(
+        range=[-22, 10],
+        showgrid=True,
+        gridcolor="#1a1c1e",
+        zeroline=True,
+        zerolinecolor="#ffffff",
+        zerolinewidth=1,
+        side="right",
+        tickfont=dict(color="#8a8f9d", size=11),
+        showspikes=True,
+        spikemode="across",
+        spikecolor="#8a8f9d",
+        spikethickness=1,
+        spikedash="dash",
+        row=2,
+        col=1,
+    )
+
+    # Render Streamlit Plotly Component
     st.plotly_chart(
         fig,
         use_container_width=True,
         config={
             "scrollZoom": True,
             "displayModeBar": True,
-            "defaultPyplotModeBar": True,
-            "modeBarButtonsToAdd": ["pan2d"],
+            "modeBarButtonsToAdd": ["pan2d", "drawline"],
         },
     )
 else:
