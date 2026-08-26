@@ -1,6 +1,7 @@
 import concurrent.futures
 from datetime import datetime, time
 import urllib.parse
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -24,10 +25,7 @@ st.markdown(
             background-color: #0d1117;
             color: #d1d4dc;
         }
-        
-        .stApp {
-            background-color: #0d1117;
-        }
+        .stApp { background-color: #0d1117; }
         
         div.block-container {
             padding-top: 0.1rem !important;
@@ -37,13 +35,8 @@ st.markdown(
             max-width: 100% !important;
         }
         
-        div[data-testid="stVerticalBlock"] > div {
-            gap: 0.1rem !important;
-        }
-        
-        div[data-testid="column"] {
-            padding: 0px 2px !important;
-        }
+        div[data-testid="stVerticalBlock"] > div { gap: 0.1rem !important; }
+        div[data-testid="column"] { padding: 0px 2px !important; }
         
         div[data-baseweb="select"] > div {
             background-color: #1e222d !important;
@@ -58,9 +51,7 @@ st.markdown(
             font-weight: 600 !important;
             font-size: 12px !important;
         }
-        div[role="listbox"] {
-            background-color: #1e222d !important;
-        }
+        div[role="listbox"] { background-color: #1e222d !important; }
         
         .metric-card {
             background-color: #131722;
@@ -268,7 +259,14 @@ def build_options_apex_dataset(timeframe, num_strikes, selected_expiry):
         )
         merged["call_oi_diff"] = merged["call_oi_diff"].fillna(0)
         merged["put_oi_diff"] = merged["put_oi_diff"].fillna(0)
-        merged["pos_builder"] = merged["put_oi_diff"] - merged["call_oi_diff"]
+        
+        # Scale to TradeFinder indicator normalized proportions (-200 to +200)
+        raw_pb = merged["put_oi_diff"] - merged["call_oi_diff"]
+        max_val = raw_pb.abs().max()
+        if max_val > 0:
+            merged["pos_builder"] = (raw_pb / max_val) * 180.0
+        else:
+            merged["pos_builder"] = raw_pb
     else:
         merged = df_spot.copy()
         merged["pos_builder"] = (merged["close"] - merged["open"]) * 10
@@ -281,7 +279,7 @@ def build_options_apex_dataset(timeframe, num_strikes, selected_expiry):
 
 
 # ==========================================
-# 2. VISIBLE TOP CONTROLS BAR
+# 2. TOP CONTROLS BAR
 # ==========================================
 top_bar = st.container()
 with top_bar:
@@ -373,13 +371,13 @@ def render_live_chart(tf, count, expiry):
                 unsafe_allow_html=True,
             )
 
-        # Plotly Subplots
+        # Dual Subplot Setup
         fig = make_subplots(
             rows=2,
             cols=1,
             shared_xaxes=True,
-            vertical_spacing=0.02,
-            row_heights=[0.68, 0.32],
+            vertical_spacing=0.0,
+            row_heights=[0.72, 0.28],
         )
 
         # Candlestick
@@ -395,13 +393,12 @@ def render_live_chart(tf, count, expiry):
                 decreasing_line_color="#f23645",
                 increasing_fillcolor="#089981",
                 decreasing_fillcolor="#f23645",
-                hoverinfo="skip",
             ),
             row=1,
             col=1,
         )
 
-        # Position Builder Histogram
+        # Position Builder Bar Chart
         fig.add_trace(
             go.Bar(
                 x=df["timestamp"],
@@ -410,89 +407,70 @@ def render_live_chart(tf, count, expiry):
                 marker_line_width=0,
                 name="Position Builder",
                 opacity=0.9,
-                hovertemplate="%{x|%b %d, %Y %I:%M %p}<extra></extra>",
             ),
             row=2,
             col=1,
         )
 
-        # Safe boundaries formatting
-        base_date = df["timestamp"].iloc[0].strftime("%Y-%m-%d")
-        start_str = f"{base_date} 09:15:00"
-        end_str = f"{base_date} 15:30:00"
-
-        # Layout Settings
+        # Single Synchronized Crosshair Config across both subplots
         fig.update_layout(
             template="plotly_dark",
-            paper_bgcolor="#131722",
-            plot_bgcolor="#131722",
-            margin=dict(l=10, r=60, t=10, b=25),
-            height=510,
+            paper_bgcolor="#0d1117",
+            plot_bgcolor="#0d1117",
+            margin=dict(l=10, r=50, t=10, b=20),
+            height=540,
             dragmode="pan",
             xaxis_rangeslider_visible=False,
-            hovermode="x",
+            hovermode="x unified",
+            hoverdistance=-1,
             showlegend=False,
         )
 
-        spike_config = dict(
+        # Axis spike linking settings
+        fig.update_xaxes(
+            showgrid=True,
+            gridcolor="#21262d",
             showspikes=True,
-            spikemode="across",
-            spikecolor="#9194a1",
+            spikemode="across+marker",
+            spikesnap="cursor",
+            spikecolor="#8b949e",
             spikethickness=1,
             spikedash="dash",
+            row=1,
+            col=1,
+        )
+
+        fig.update_xaxes(
+            showgrid=True,
+            gridcolor="#21262d",
+            showspikes=True,
+            spikemode="across+marker",
             spikesnap="cursor",
-        )
-
-        # Top Axis
-        fig.update_xaxes(
-            range=[start_str, end_str],
-            showgrid=True,
-            gridcolor="#2a2e39",
-            gridwidth=1,
-            row=1,
-            col=1,
-            **spike_config,
-        )
-
-        fig.update_yaxes(
-            showgrid=True,
-            gridcolor="#2a2e39",
-            gridwidth=1,
-            color="#787b86",
-            side="right",
-            tickfont=dict(family="Courier New, monospace", size=11),
-            row=1,
-            col=1,
-        )
-
-        # Bottom Axis
-        fig.update_xaxes(
-            range=[start_str, end_str],
-            showgrid=True,
-            gridcolor="#2a2e39",
-            color="#787b86",
+            spikecolor="#8b949e",
+            spikethickness=1,
+            spikedash="dash",
             tickformat="%H:%M",
             row=2,
             col=1,
-            **spike_config,
         )
-
-        if len(df) > 2:
-            scaled_max = df["pos_builder"].abs().quantile(0.98)
-            if scaled_max > 0:
-                fig.update_yaxes(
-                    range=[-scaled_max * 1.25, scaled_max * 1.25], row=2, col=1
-                )
 
         fig.update_yaxes(
             showgrid=True,
-            gridcolor="#2a2e39",
+            gridcolor="#21262d",
             side="right",
+            tickfont=dict(color="#8b949e", size=10),
+            row=1,
+            col=1,
+        )
+
+        fig.update_yaxes(
+            range=[-220, 220],
+            showgrid=True,
+            gridcolor="#21262d",
             zeroline=True,
-            zerolinecolor="#434651",
-            zerolinewidth=1,
-            color="#787b86",
-            tickfont=dict(family="Courier New, monospace", size=10),
+            zerolinecolor="#30363d",
+            side="right",
+            tickfont=dict(color="#8b949e", size=10),
             row=2,
             col=1,
         )
@@ -506,15 +484,12 @@ def render_live_chart(tf, count, expiry):
                 "modeBarButtonsToRemove": [
                     "lasso2d",
                     "select2d",
-                    "toggleSpikelines",
                 ],
                 "displaylogo": False,
             },
         )
     else:
-        st.error(
-            "Unable to fetch market data. Please check Upstox token and connectivity."
-        )
+        st.error("Unable to fetch market data from Upstox API.")
 
 
 render_live_chart(tf_option, strike_count, expiry_input)
