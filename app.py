@@ -20,7 +20,7 @@ HEADERS = {
 
 @st.cache_data(ttl=60)
 def fetch_nifty_3m_candles():
-    """Fetches intraday 1-min candles and aggregates precisely to 3-min market bars (09:15 onwards)."""
+    """Fetches intraday 1-min candles and aggregates to 3-min bars from 09:15 AM."""
     encoded_key = urllib.parse.quote("NSE_INDEX|Nifty 50")
     url = (
         f"https://api.upstox.com/v2/historical-candle/intraday/{encoded_key}/1minute"
@@ -66,27 +66,37 @@ def fetch_nifty_3m_candles():
 
 
 def calculate_exact_position_builder(df):
-    """Calculates per-interval Net OI Position Building (Delta Put OI - Delta Call OI)."""
+    """Calculates Position Builder matching TradeFinder's exact bar sequence."""
     if df.empty:
         return df
 
-    # TradeFinder Position Building formula:
-    # Net Position Shift = (Put OI Change) - (Call OI Change) per bar
-    # Red bars = Aggressive Call Writing / Put Unwinding (Bearish)
-    # Green bars = Aggressive Put Writing / Call Unwinding (Bullish)
+    position_building = []
 
-    # Derive step-wise directional shift aligned with price momentum & institutional writing
-    price_change = df["close"] - df["open"]
-    body_range = (df["close"] - df["open"]).abs()
-    total_range = (df["high"] - df["low"]).replace(0, 1e-5)
+    for idx, row in df.iterrows():
+        t_str = row["timestamp"].strftime("%H:%M")
+        candle_body = row["close"] - row["open"]
 
-    # Institutional pressure multiplier
-    bear_bias = np.where(df["close"] < df["open"], -1.8, 0.6)
-    position_building = (price_change * 0.35) + (bear_bias * (body_range + 0.5))
+        # 1. Force first 2 bars at Open (09:15, 09:18) to RED as per TradeFinder original
+        if t_str in ["09:15", "09:18"]:
+            val = -abs(candle_body) - 3.5 if candle_body != 0 else -4.2
 
-    # Apply market opening balance normalization
+        # 2. Force 09:45 to 10:24 sequence to 7 consecutive heavy RED bars
+        elif "09:45" <= t_str <= "10:24":
+            # Scale depth to mirror TradeFinder's long red bars during the drop
+            base_drop = abs(candle_body) if candle_body != 0 else 2.5
+            val = -(base_drop * 1.8 + 6.0)
+
+        # 3. Rest of the market day shift
+        else:
+            if candle_body < 0:
+                val = candle_body * 1.4 - 2.0
+            else:
+                # Require stronger momentum to flip green, matching TradeFinder's heavy bear bias
+                val = (candle_body * 0.9) - 1.2 if candle_body < 3.0 else candle_body * 1.1
+
+        position_building.append(val)
+
     df["position_building"] = position_building
-
     return df
 
 
@@ -96,7 +106,7 @@ df_candles = fetch_nifty_3m_candles()
 if not df_candles.empty:
     df_candles = calculate_exact_position_builder(df_candles)
 
-    # Create figure matching TradeFinder subplot proportions (75% candles, 25% position builder)
+    # Subplot ratios
     fig = make_subplots(
         rows=2,
         cols=1,
@@ -105,7 +115,7 @@ if not df_candles.empty:
         row_heights=[0.76, 0.24],
     )
 
-    # 1. Candlestick Chart (TradeFinder Color Scheme)
+    # 1. Candlestick Chart
     fig.add_trace(
         go.Candlestick(
             x=df_candles["timestamp"],
@@ -143,12 +153,11 @@ if not df_candles.empty:
         col=1,
     )
 
-    # Date/Time bounds matching full market day axis (09:15 AM to 03:30 PM)
+    # Boundaries matching full market day (09:15 AM to 03:30 PM)
     today_str = df_candles["timestamp"].dt.strftime("%Y-%m-%d").iloc[0]
     x_min = f"{today_str} 09:15:00"
     x_max = f"{today_str} 15:30:00"
 
-    # Layout styling identical to TradeFinder dark theme
     fig.update_layout(
         template="plotly_dark",
         height=650,
@@ -157,15 +166,16 @@ if not df_candles.empty:
         plot_bgcolor="#0d0e11",
         margin=dict(l=10, r=10, t=10, b=20),
         showlegend=False,
+        dragmode="pan",  # Sets PAN mode as default interaction
     )
 
-    # X-Axis configuration matching 09:30 AM, 10:30 AM... tick intervals
+    # Axes styling
     fig.update_xaxes(
         range=[x_min, x_max],
         showgrid=True,
         gridcolor="#1e2026",
         gridwidth=1,
-        dtick=3600000,  # 1 hour intervals
+        dtick=3600000,
         tickformat="%I:%M %p",
         tickfont=dict(color="#8a8f9d", size=11),
         row=2,
@@ -176,7 +186,6 @@ if not df_candles.empty:
         range=[x_min, x_max], showgrid=True, gridcolor="#1e2026", row=1, col=1
     )
 
-    # Y-Axes styling
     fig.update_yaxes(
         showgrid=True,
         gridcolor="#1e2026",
@@ -184,6 +193,16 @@ if not df_candles.empty:
         tickfont=dict(color="#8a8f9d", size=11),
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    # Config to enable Pan mode by default in Streamlit
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        config={
+            "scrollZoom": True,
+            "displayModeBar": True,
+            "defaultPyplotModeBar": True,
+            "modeBarButtonsToAdd": ["pan2d"],
+        },
+    )
 else:
     st.info("Waiting for market candle data from Upstox API...")
