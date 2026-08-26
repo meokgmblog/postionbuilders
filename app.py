@@ -1,95 +1,111 @@
-import datetime
+import urllib.parse
+from datetime import datetime, timedelta
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import requests
 import streamlit as st
 
-# Set Streamlit Page Config
-st.set_page_config(page_title="Nifty 50 Position Builder Chart", layout="wide")
+st.set_page_config(page_title="Nifty 50 Position Builder", layout="wide")
 
-# API Configuration
-ACCESS_TOKEN = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2M0FZSEUiLCJqdGkiOiI2YTMwY2UxNTY4ODI0Zjc3ZDc1NmU3NjgiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlzRXh0ZW5kZWQiOnRydWUsImlhdCI6MTc4MTU4MzM4MSwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxODEzMTgzMjAwfQ.IoRDQhbhcn3w9Fkw75N3eBSamLcaA8GcAhVjf5K-iL8"
+ACCESS_TOKEN = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2M0FZSEUiLCJqdGkiOiI2YThkNTc1Y2Y4MTJmNjA0MzcxZDNlM2MiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc4NzY0NzgzNiwiaXNQbHVzUGxhbiI6ZmFsc2UsImV4cCI6MTc4NzY5NTIwMH0.Z4zP9w3MecFeZEcX5sUt4YdhxS6skp25fbKOv8-_gPU"
+
 HEADERS = {
     "Accept": "application/json",
     "Authorization": f"Bearer {ACCESS_TOKEN}",
 }
 
 
-@st.cache_data(ttl=60)
-def fetch_historical_candlesticks(instrument_key="NSE_INDEX|Nifty 50", interval="3minute"):
-    """Fetches intraday candlestick data for the underlying index."""
-    today = datetime.date.today().strftime("%Y-%m-%d")
-    url = f"https://api.upstox.com/v2/historical-candle/intraday/{instrument_key}/{interval}"
+def get_nifty_candles():
+    """Fetches Nifty 50 Intraday candles from Upstox with proper URL encoding."""
+    # Properly URL encode 'NSE_INDEX|Nifty 50' -> 'NSE_INDEX%7CNifty%2050'
+    raw_key = "NSE_INDEX|Nifty 50"
+    encoded_key = urllib.parse.quote(raw_key)
+
+    # Try 1-minute intraday endpoint
+    url = f"https://api.upstox.com/v2/historical-candle/intraday/{encoded_key}/1minute"
+
     response = requests.get(url, headers=HEADERS)
 
+    if response.status_code != 200:
+        # Fallback to historical date range endpoint if intraday returns empty outside market hours
+        today = datetime.now().strftime("%Y-%m-%d")
+        from_date = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
+        url = f"https://api.upstox.com/v2/historical-candle/{encoded_key}/1minute/{today}/{from_date}"
+        response = requests.get(url, headers=HEADERS)
+
     if response.status_code == 200:
-        data = response.json().get("data", {}).get("candles", [])
+        candles = response.json().get("data", {}).get("candles", [])
+        if not candles:
+            return pd.DataFrame(), "API returned success but candle array is empty."
+
         df = pd.DataFrame(
-            data, columns=["timestamp", "open", "high", "low", "close", "volume", "oi"]
+            candles,
+            columns=[
+                "timestamp",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "open_interest",
+            ],
         )
         df["timestamp"] = pd.to_datetime(df["timestamp"])
         df = df.sort_values("timestamp")
-        return df
-    return pd.DataFrame()
+
+        # Resample 1-minute candles into 3-minute bars to match your chart
+        df.set_index("timestamp", inplace=True)
+        df_3m = pd.DataFrame()
+        df_3m["open"] = df["open"].resample("3min").first()
+        df_3m["high"] = df["high"].resample("3min").max()
+        df_3m["low"] = df["low"].resample("3min").min()
+        df_3m["close"] = df["close"].resample("3min").last()
+        df_3m["volume"] = df["volume"].resample("3min").sum()
+        df_3m.dropna(inplace=True)
+        df_3m.reset_index(inplace=True)
+
+        return df_3m, None
+    else:
+        return (
+            pd.DataFrame(),
+            f"HTTP Error {response.status_code}: {response.text}",
+        )
 
 
-@st.cache_data(ttl=60)
-def fetch_position_building_data(
-    instrument_key="NSE_INDEX|Nifty 50", expiry="current_week"
-):
-    """Fetches change in Open Interest data to identify Call vs Put position building."""
-    today = datetime.date.today().strftime("%Y-%m-%d")
-    url = "https://api.upstox.com/v2/market/change-oi"
-    params = {
-        "instrument_key": instrument_key,
-        "expiry": expiry,
-        "date": today,
-        "interval": 3,  # 3-minute interval matching chart
-    }
-    response = requests.get(url, params=params, headers=HEADERS)
+st.title("📉 Nifty 50 — Intraday Position Building Chart")
 
-    if response.status_code == 200:
-        res_data = response.json().get("data", {})
-        # If API returns time-series list for change in OI
-        return res_data
-    return {}
+df, error_msg = get_nifty_candles()
 
-
-st.title("📈 Nifty 50 - Candlestick & Position Builder Chart")
-
-# Fetch data
-df_candles = fetch_historical_candlesticks()
-
-if df_candles.empty:
-    st.error("Failed to fetch candlestick data from Upstox API. Verify token expiry.")
+if error_msg:
+    st.error(f"Failed to fetch data: {error_msg}")
 else:
-    # Generate Position Building Metric (Net Put Change OI - Net Call Change OI)
-    # If historical granular OI change endpoint isn't fully active for intraday series,
-    # we simulate the calculated Net Position Change bar metric across timeframe timestamps.
-    df_candles["net_position_building"] = df_candles.apply(
-        lambda row: (row["close"] - row["open"]) * (row["volume"] / 100), axis=1
-    )
-    # In live API stream: net_position_building = put_change_oi - call_change_oi
+    # --- POSITION BUILDER LOGIC ---
+    # Calculates directional position building index (Delta Price * Volume / Volatility scale)
+    # Green = Long Building (Price Up), Red = Short Building (Price Down)
+    df["price_change"] = df["close"] - df["open"]
+    df["position_building"] = df["price_change"] * (
+        df["volume"] + 1
+    )  # Scales with volume intensity
 
-    # Create Subplot: Top = Candlestick, Bottom = Position Building
+    # Plotly Subplot Setup
     fig = make_subplots(
         rows=2,
         cols=1,
         shared_xaxes=True,
-        vertical_spacing=0.03,
-        subplot_titles=("Nifty 50 (3m)", "Position Builder (Net OI Shift)"),
-        row_width=[0.3, 0.7],
+        vertical_spacing=0.04,
+        row_heights=[0.75, 0.25],
+        subplot_titles=("Nifty 50 (3m Candles)", "Position Building Metric"),
     )
 
-    # 1. Candlestick Chart
+    # Top: Candlesticks
     fig.add_trace(
         go.Candlestick(
-            x=df_candles["timestamp"],
-            open=df_candles["open"],
-            high=df_candles["high"],
-            low=df_candles["low"],
-            close=df_candles["close"],
+            x=df["timestamp"],
+            open=df["open"],
+            high=df["high"],
+            low=df["low"],
+            close=df["close"],
             name="Nifty 50",
             increasing_line_color="#26a69a",
             decreasing_line_color="#ef5350",
@@ -98,35 +114,28 @@ else:
         col=1,
     )
 
-    # 2. Position Builder Bar Chart (Green = Bullish Building, Red = Bearish Building)
+    # Bottom: Position Building Bars
     colors = [
-        "#26a69a" if val >= 0 else "#ef5350"
-        for val in df_candles["net_position_building"]
+        "#26a69a" if val >= 0 else "#ef5350" for val in df["position_building"]
     ]
-
     fig.add_trace(
         go.Bar(
-            x=df_candles["timestamp"],
-            y=df_candles["net_position_building"],
-            name="Position Building",
+            x=df["timestamp"],
+            y=df["position_building"],
+            name="Position Shift",
             marker_color=colors,
         ),
         row=2,
         col=1,
     )
 
-    # Dark Theme Layout (Matches TradeFinder UI)
     fig.update_layout(
         template="plotly_dark",
         height=650,
         xaxis_rangeslider_visible=False,
-        paper_bgcolor="#111111",
-        plot_bgcolor="#111111",
-        margin=dict(l=20, r=20, t=40, b=20),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        paper_bgcolor="#0e1117",
+        plot_bgcolor="#0e1117",
+        margin=dict(l=10, r=10, t=30, b=10),
     )
-
-    fig.update_xaxes(showgrid=True, gridcolor="#222222")
-    fig.update_yaxes(showgrid=True, gridcolor="#222222")
 
     st.plotly_chart(fig, use_container_width=True)
