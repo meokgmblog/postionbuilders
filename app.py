@@ -133,7 +133,7 @@ if not df_candles.empty:
         row_heights=[0.78, 0.22],
     )
 
-    # 1. Candlestick Chart
+    # 1. Candlestick Chart (OHLC info removed from hover display)
     fig.add_trace(
         go.Candlestick(
             x=df_candles["timestamp"],
@@ -147,7 +147,7 @@ if not df_candles.empty:
             decreasing_line_color="#fe4050",
             decreasing_fillcolor="#fe4050",
             whiskerwidth=0.4,
-            hoverinfo="skip",
+            hoverinfo="skip",  # Hides default Nifty 50 Open/High/Low/Close text box
         ),
         row=1,
         col=1,
@@ -173,9 +173,10 @@ if not df_candles.empty:
         col=1,
     )
 
-    # Time Boundaries as Timestamp objects (Fixes Plotly range ValueError)
-    start_dt = df_candles["timestamp"].iloc[0].replace(hour=9, minute=15, second=0)
-    end_dt = df_candles["timestamp"].iloc[0].replace(hour=15, minute=30, second=0)
+    # Convert market boundaries to formatted ISO string for Plotly validator safety
+    base_date = df_candles["timestamp"].iloc[0].strftime("%Y-%m-%d")
+    start_str = f"{base_date} 09:15:00"
+    end_str = f"{base_date} 15:30:00"
 
     fig.update_layout(
         template="plotly_dark",
@@ -186,16 +187,16 @@ if not df_candles.empty:
         margin=dict(l=10, r=10, t=10, b=20),
         showlegend=False,
         dragmode="pan",
-        hovermode="x unified",
+        hovermode="x",  # Unified single vertical crosshair line
     )
 
-    # --- UNIFIED CROSSHAIR CONFIGURATION ---
+    # --- UNIFIED SINGLE CROSSHAIR CONFIGURATION ---
     fig.update_xaxes(
-        range=[start_dt, end_dt],
+        range=[start_str, end_str],
         showgrid=True,
         gridcolor="#1a1c1e",
         showspikes=True,
-        spikemode="across+x",
+        spikemode="across",  # Continuous vertical line across subplots
         spikesnap="cursor",
         spikecolor="#8a8f9d",
         spikethickness=1,
@@ -207,11 +208,11 @@ if not df_candles.empty:
     )
 
     fig.update_xaxes(
-        range=[start_dt, end_dt],
+        range=[start_str, end_str],
         showgrid=True,
         gridcolor="#1a1c1e",
         showspikes=True,
-        spikemode="across+x",
+        spikemode="across",
         spikesnap="cursor",
         spikecolor="#8a8f9d",
         spikethickness=1,
