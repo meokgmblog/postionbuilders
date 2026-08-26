@@ -6,6 +6,7 @@ import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import pytz
 import requests
 import streamlit as st
 
@@ -15,7 +16,6 @@ import streamlit as st
 st.set_page_config(page_title="NIFTY 50 Position Builder", layout="wide")
 st.title("📈 NIFTY 50 - 3 Minute Position Builder")
 
-# Hardcoded Access Token (UI input removed)
 ACCESS_TOKEN = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI6M0FZSEUiLCJqdGkiOiI6YThkNTc1Y2Y4MTJmNjA0MzcxZDNlM2MiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc4NzY0NzgzNiwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzg3Njk1MjAwfQ.Z4zP9w3MecFeZEcX5sUt4YdhxS6skp25fbKOv8-_gPU"
 
 NIFTY_INDEX_KEY = "NSE_INDEX|Nifty 50"
@@ -23,6 +23,7 @@ INTERVAL = 3
 MARKET_START = "09:15"
 MARKET_END = "15:30"
 HISTOGRAM_SCALE = 1000
+IST = pytz.timezone("Asia/Kolkata")
 
 # ================================================================
 # API HELPERS
@@ -68,82 +69,109 @@ def get_nifty_index_intraday(token):
         candles,
         columns=["timestamp", "open", "high", "low", "close", "volume", "oi"],
     )
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
+
+    # CONVERT TO IST TIMEZONE
+    df["timestamp"] = (
+        pd.to_datetime(df["timestamp"]).dt.tz_convert(IST).dt.tz_localize(None)
+    )
     return df.sort_values("timestamp").reset_index(drop=True)
 
 
 @st.cache_data(ttl=3600)
-def fetch_upstox_nifty_futures_key():
-    """
-    Downloads Upstox official NSE master instrument list with fallback column checks.
-    """
+def fetch_upstox_nifty_instruments():
+    """Downloads Upstox official master file to get current Futures & Options instruments."""
     url = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.csv.gz"
-    
+
     try:
         res = requests.get(url, timeout=30)
         if res.status_code != 200:
-            raise Exception(f"HTTP {res.status_code} while downloading master file.")
-            
+            raise Exception(f"HTTP {res.status_code} while downloading file.")
+
         with gzip.open(io.BytesIO(res.content), "rt") as f:
             df = pd.read_csv(f)
 
-        # Standardize column headers to lowercase
         df.columns = [c.lower() for c in df.columns]
 
-        # Identify key columns flexibly
-        type_col = "instrument_type" if "instrument_type" in df.columns else "segment"
-        key_col = "instrument_key" if "instrument_key" in df.columns else "instrument_token"
-        sym_col = "trading_symbol" if "trading_symbol" in df.columns else "tradingsymbol"
+        type_col = (
+            "instrument_type" if "instrument_type" in df.columns else "segment"
+        )
+        key_col = (
+            "instrument_key"
+            if "instrument_key" in df.columns
+            else "instrument_token"
+        )
+        sym_col = (
+            "trading_symbol"
+            if "trading_symbol" in df.columns
+            else "tradingsymbol"
+        )
         name_col = "name" if "name" in df.columns else "asset_symbol"
 
-        # Filter strictly for NIFTY Futures
-        mask = (
-            (df[name_col].astype(str).str.upper() == "NIFTY") & 
-            (df[type_col].astype(str).str.upper().str.contains("FUT"))
-        )
-        nifty_futs = df[mask].copy()
+        mask = df[name_col].astype(str).str.upper() == "NIFTY"
+        nifty_df = df[mask].copy()
 
-        if nifty_futs.empty:
-            raise Exception("No matching NIFTY Futures contracts found in master file.")
-
-        nifty_futs["expiry_dt"] = pd.to_datetime(nifty_futs["expiry"])
+        nifty_df["expiry_dt"] = pd.to_datetime(nifty_df["expiry"])
         today = pd.Timestamp(datetime.now().date())
-        
-        # Select active contract with nearest future expiry
-        active_futs = nifty_futs[nifty_futs["expiry_dt"].dt.date >= today.date()].sort_values("expiry_dt")
-        
-        if active_futs.empty:
-            # Fallback to absolute latest contract if all are expired today
-            active_futs = nifty_futs.sort_values("expiry_dt", ascending=False)
 
-        selected = active_futs.iloc[0]
-        return str(selected[key_col]), str(selected[sym_col])
+        active_df = nifty_df[
+            nifty_df["expiry_dt"].dt.date >= today.date()
+        ].sort_values("expiry_dt")
+
+        # 1. Futures Contract
+        futs = active_df[
+            active_df[type_col].astype(str).str.upper().str.contains("FUT")
+        ]
+        fut_key, fut_sym = (
+            (futs.iloc[0][key_col], futs.iloc[0][sym_col])
+            if not futs.empty
+            else (None, None)
+        )
+
+        # 2. Nearest Expiry Options Contracts (Weekly)
+        opts = active_df[
+            active_df[type_col].astype(str).str.upper().isin(["CE", "PE"])
+        ]
+        nearest_expiry = (
+            opts.iloc[0]["expiry_dt"] if not opts.empty else None
+        )
+
+        return (
+            fut_key,
+            fut_sym,
+            opts[opts["expiry_dt"] == nearest_expiry],
+            key_col,
+            sym_col,
+        )
 
     except Exception as e:
-        raise RuntimeError(f"Failed to resolve NIFTY Future key: {str(e)}")
+        raise RuntimeError(f"Master file parsing error: {str(e)}")
 
 
-def get_nifty_future_intraday(token, future_key):
-    encoded_key = quote(future_key, safe="")
+def get_derivative_intraday(token, instrument_key):
+    encoded_key = quote(instrument_key, safe="")
     url = f"https://api.upstox.com/v3/historical-candle/intraday/{encoded_key}/minutes/{INTERVAL}"
 
     res = upstox_get(url, token)
     candles = res.get("data", {}).get("candles", [])
 
     if not candles:
-        raise RuntimeError(
-            f"No futures candle data returned for key: {future_key}"
-        )
+        return pd.DataFrame()
 
     df = pd.DataFrame(
         candles,
         columns=["timestamp", "open", "high", "low", "close", "volume", "oi"],
     )
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
+
+    # CONVERT TO IST TIMEZONE
+    df["timestamp"] = (
+        pd.to_datetime(df["timestamp"]).dt.tz_convert(IST).dt.tz_localize(None)
+    )
     return df.sort_values("timestamp").reset_index(drop=True)
 
 
 def filter_market_hours(df):
+    if df.empty:
+        return df
     df = df.copy()
     df["time"] = df["timestamp"].dt.time
     start = datetime.strptime(MARKET_START, "%H:%M").time()
@@ -155,24 +183,24 @@ def filter_market_hours(df):
 # ================================================================
 # POSITION BUILDER CALCULATION
 # ================================================================
-def calculate_position_builder(price_df, future_df):
+def calculate_position_builder(price_df, derivative_df):
     price = price_df.copy()
-    future = future_df[["timestamp", "close", "oi"]].copy()
-    future.rename(
-        columns={"close": "future_close", "oi": "future_oi"}, inplace=True
+    deriv = derivative_df[["timestamp", "close", "oi"]].copy()
+    deriv.rename(
+        columns={"close": "deriv_close", "oi": "deriv_oi"}, inplace=True
     )
 
-    df = pd.merge(price, future, on="timestamp", how="inner").sort_values(
+    df = pd.merge(price, deriv, on="timestamp", how="inner").sort_values(
         "timestamp"
     )
 
     if df.empty:
-        raise RuntimeError("Timestamp mismatch between Index and Futures data.")
+        raise RuntimeError("Timestamp mismatch between Index and Options data.")
 
     df["price_change"] = df["close"].diff(1)
     df["price_change_pct"] = df["close"].pct_change(1) * 100
-    df["oi_change"] = df["future_oi"].diff(1)
-    df["oi_change_pct"] = df["future_oi"].pct_change(1) * 100
+    df["oi_change"] = df["deriv_oi"].diff(1)
+    df["oi_change_pct"] = df["deriv_oi"].pct_change(1) * 100
 
     def classify(row):
         p_chg = row["price_change"]
@@ -209,9 +237,9 @@ def calculate_position_builder(price_df, future_df):
 
 
 # ================================================================
-# STREAMLIT PLOTTING & UI
+# STREAMLIT CHART RENDERING
 # ================================================================
-def render_chart(df, future_symbol):
+def render_chart(df, source_label):
     fig = plt.figure(figsize=(14, 7), facecolor="#0c1117")
     gs = fig.add_gridspec(5, 1, hspace=0.04)
 
@@ -247,7 +275,7 @@ def render_chart(df, future_symbol):
 
     p_width = (3 / (24 * 60)) * 0.78
     values = df["position_builder_scaled"]
-    colors = np.where(values >= 0, "#12665f", "#713437")
+    colors = np.where(values >= 0, "#19b5a5", "#ff4d5a")
     ax_position.bar(
         df["timestamp"],
         values,
@@ -280,7 +308,7 @@ def render_chart(df, future_symbol):
     ax_price.text(
         0.995,
         0.95,
-        f"OI Source: {future_symbol}",
+        f"OI Source: {source_label}",
         transform=ax_price.transAxes,
         ha="right",
         va="top",
@@ -294,6 +322,8 @@ def render_chart(df, future_symbol):
         ax.tick_params(colors="#89929e", labelsize=8)
 
     ax_price.tick_params(labelbottom=False)
+
+    # DISPLAY IST TIME ON X-AXIS
     ax_position.xaxis.set_major_locator(mdates.MinuteLocator(interval=30))
     ax_position.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
 
@@ -301,28 +331,68 @@ def render_chart(df, future_symbol):
 
 
 # ================================================================
-# AUTOMATIC RUN ON PAGE LOAD / REFRESH
+# MAIN ENTRYPOINT
 # ================================================================
 try:
-    with st.spinner("Fetching NIFTY Index and Active Futures data..."):
+    data_source_mode = st.radio(
+        "Select OI Source (TradeFinder uses Current Expiry Weekly Options):",
+        ["Current Weekly Expiry Options (TradeFinder Mode)", "Monthly Futures"],
+        horizontal=True,
+    )
+
+    with st.spinner("Fetching NIFTY Index and OI data..."):
         idx_df = filter_market_hours(get_nifty_index_intraday(ACCESS_TOKEN))
-        fut_key, fut_symbol = fetch_upstox_nifty_futures_key()
-        fut_df = filter_market_hours(
-            get_nifty_future_intraday(ACCESS_TOKEN, fut_key)
+        fut_key, fut_sym, opts_df, key_col, sym_col = (
+            fetch_upstox_nifty_instruments()
         )
 
-        builder_df = calculate_position_builder(idx_df, fut_df)
+        if "Weekly" in data_source_mode:
+            # Aggregate OI across near-the-money options contracts for the current weekly expiry
+            last_close = idx_df["close"].iloc[-1]
+            opts_df["strike"] = pd.to_numeric(
+                opts_df.get("strike_price", opts_df.get("strike")),
+                errors="coerce",
+            )
 
-    st.success(f"Connected to {fut_symbol} (Instrument Key: {fut_key})")
-    render_chart(builder_df, fut_symbol)
+            # Filter strikes around current price (+- 300 pts) to match active open interest movements
+            atm_opts = opts_df[
+                (opts_df["strike"] >= last_close - 300)
+                & (opts_df["strike"] <= last_close + 300)
+            ]
 
-    st.subheader("Recent Position Builder Data")
+            combined_oi_df = None
+            for _, row in atm_opts.head(6).iterrows():
+                opt_data = filter_market_hours(
+                    get_derivative_intraday(ACCESS_TOKEN, row[key_col])
+                )
+                if not opt_data.empty:
+                    if combined_oi_df is None:
+                        combined_oi_df = opt_data[
+                            ["timestamp", "close", "oi"]
+                        ].copy()
+                    else:
+                        combined_oi_df["oi"] += opt_data["oi"]
+
+            target_deriv_df = combined_oi_df
+            source_tag = f"NIFTY Weekly Expiry Options ({opts_df.iloc[0]['expiry_dt'].strftime('%b-%d')})"
+        else:
+            target_deriv_df = filter_market_hours(
+                get_derivative_intraday(ACCESS_TOKEN, fut_key)
+            )
+            source_tag = f"{fut_sym}"
+
+        builder_df = calculate_position_builder(idx_df, target_deriv_df)
+
+    st.success(f"Connected to {source_tag} | Timezone: IST (UTC+5:30)")
+    render_chart(builder_df, source_tag)
+
+    st.subheader("Recent Position Builder Data (IST)")
     st.dataframe(
         builder_df[
             [
                 "timestamp",
                 "close",
-                "future_oi",
+                "deriv_oi",
                 "position_type",
                 "position_builder_scaled",
             ]
