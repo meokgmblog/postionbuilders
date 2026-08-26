@@ -254,7 +254,7 @@ def render_chart(df, source_label):
     ax_position.text(
         0.005,
         0.88,
-        "POSITION BUILDER HISTOGRAM",
+        "",
         transform=ax_position.transAxes,
         fontsize=8,
         fontweight="bold",
@@ -264,7 +264,6 @@ def render_chart(df, source_label):
     ax_price.text(
         0.995,
         0.95,
-        f"OI Source: {source_label}",
         transform=ax_price.transAxes,
         ha="right",
         va="top",
