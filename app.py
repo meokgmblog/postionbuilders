@@ -215,19 +215,15 @@ def calculate_position_builder(price_df, deriv_df, is_options=True):
     df["price_change"] = df["close"].diff(1)
 
     if is_options:
-        # Calculate Delta of PE OI and Delta of CE OI
         df["ce_oi_change"] = df["ce_oi"].diff(1)
         df["pe_oi_change"] = df["pe_oi"].diff(1)
 
-        # Net OI Change = Delta PE OI - Delta CE OI
-        # Positive Net OI = Bullish Bias (Put writing / Call unwinding)
-        # Negative Net OI = Bearish Bias (Call writing / Put unwinding)
+        # Net Directional OI Change = Delta PE OI - Delta CE OI
         df["net_oi_change"] = df["pe_oi_change"] - df["ce_oi_change"]
         df["position_builder_scaled"] = (
             df["net_oi_change"] / 50
-        )  # Normalize by contract lot size
+        )  # Normalized scale
     else:
-        # Futures Calculation Standard
         df["oi_change"] = df["deriv_oi"].diff(1)
         df["oi_change_pct"] = df["deriv_oi"].pct_change(1) * 100
 
@@ -364,7 +360,7 @@ try:
                 opts_df[strike_col], errors="coerce"
             )
 
-            # Filter ATM range (+- 300 pts around current index value)
+            # Filter ATM range +- 300 pts
             atm_opts = opts_df[
                 (opts_df["strike_num"] >= last_close - 300)
                 & (opts_df["strike_num"] <= last_close + 300)
@@ -373,7 +369,6 @@ try:
             if atm_opts.empty:
                 atm_opts = opts_df
 
-            # Separate into CE and PE dataframes
             ce_opts = atm_opts[
                 atm_opts[type_col].astype(str).str.upper().str.contains("CE")
             ]
@@ -391,7 +386,16 @@ try:
                         ce_df = opt_data[["timestamp", "oi"]].copy()
                         ce_df.rename(columns={"oi": "ce_oi"}, inplace=True)
                     else:
-                        ce_df["ce_oi"] += opt_data["oi"]
+                        ce_df = pd.merge(
+                            ce_df,
+                            opt_data[["timestamp", "oi"]],
+                            on="timestamp",
+                            how="outer",
+                        )
+                        ce_df["ce_oi"] = (
+                            ce_df["ce_oi"].fillna(0) + ce_df["oi"].fillna(0)
+                        )
+                        ce_df.drop(columns=["oi"], inplace=True)
 
             pe_df = None
             for _, row in pe_opts.head(6).iterrows():
@@ -403,7 +407,16 @@ try:
                         pe_df = opt_data[["timestamp", "oi"]].copy()
                         pe_df.rename(columns={"oi": "pe_oi"}, inplace=True)
                     else:
-                        pe_df["pe_oi"] += opt_data["oi"]
+                        pe_df = pd.merge(
+                            pe_df,
+                            opt_data[["timestamp", "oi"]],
+                            on="timestamp",
+                            how="outer",
+                        )
+                        pe_df["pe_oi"] = (
+                            pe_df["pe_oi"].fillna(0) + pe_df["oi"].fillna(0)
+                        )
+                        pe_df.drop(columns=["oi"], inplace=True)
 
             if ce_df is not None and pe_df is not None:
                 opts_combined = pd.merge(
@@ -418,6 +431,7 @@ try:
                 fut_df = filter_market_hours(
                     get_derivative_intraday(ACCESS_TOKEN, fut_key)
                 )
+                fut_df.rename(columns={"oi": "deriv_oi"}, inplace=True)
                 builder_df = calculate_position_builder(
                     idx_df, fut_df, is_options=False
                 )
@@ -426,6 +440,7 @@ try:
             fut_df = filter_market_hours(
                 get_derivative_intraday(ACCESS_TOKEN, fut_key)
             )
+            fut_df.rename(columns={"oi": "deriv_oi"}, inplace=True)
             builder_df = calculate_position_builder(
                 idx_df, fut_df, is_options=False
             )
