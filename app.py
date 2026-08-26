@@ -95,7 +95,7 @@ HTTP_SESSION.headers.update(
 
 
 # ==========================================
-# 1. DATA ENGINE
+# 1. DATA ENGINE (DELTA-WEIGHTED CUMULATIVE)
 # ==========================================
 def fetch_raw_1min_candles(instrument_key):
     url = f"https://api.upstox.com/v2/historical-candle/intraday/{instrument_key}/1minute"
@@ -185,9 +185,28 @@ def fetch_strike_oi_series(key, timeframe):
     df_1m = fetch_raw_1min_candles(key)
     if not df_1m.empty:
         df_res = resample_candles(df_1m, timeframe)
-        df_res["oi_diff"] = df_res["oi"].diff().fillna(df_res["oi"])
+        # 09:15 AM Baseline Calculation: Calculate delta from 09:15 open OI
+        df_res["oi_diff"] = df_res["oi"] - df_res["oi"].iloc[0]
         return df_res.set_index("timestamp")["oi_diff"]
     return pd.Series(dtype=float)
+
+
+def get_approx_delta(strike, spot_price, is_call):
+    """
+    Approximates option Delta exposure without requiring full Black-Scholes greeks.
+    - ATM (~0.50)
+    - In-The-Money (0.65 to 0.85)
+    - Out-Of-The-Money (0.15 to 0.35)
+    """
+    diff = spot_price - strike
+    if is_call:
+        if abs(diff) <= 25:
+            return 0.50
+        return 0.75 if diff > 0 else 0.25
+    else:
+        if abs(diff) <= 25:
+            return 0.50
+        return 0.75 if diff < 0 else 0.25
 
 
 def build_options_apex_dataset(timeframe, num_strikes, selected_expiry):
@@ -205,11 +224,9 @@ def build_options_apex_dataset(timeframe, num_strikes, selected_expiry):
         )
         return df_spot
 
-    # Map available strikes in the chain
     chain_sorted = sorted(chain, key=lambda x: x.get("strike_price", 0))
     strikes = [item["strike_price"] for item in chain_sorted]
 
-    # Collect all candidate option keys across the chain
     all_keys = []
     for item in chain_sorted:
         if "call_options" in item:
@@ -217,7 +234,7 @@ def build_options_apex_dataset(timeframe, num_strikes, selected_expiry):
         if "put_options" in item:
             all_keys.append(item["put_options"]["instrument_key"])
 
-    # Fetch OI series in parallel for candidate strikes
+    # Fetch OI series in parallel
     oi_map = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
         future_to_key = {
@@ -230,13 +247,12 @@ def build_options_apex_dataset(timeframe, num_strikes, selected_expiry):
             if not res.empty:
                 oi_map[k] = res
 
-    # Calculate Position Builder dynamically per candle based on rolling spot price
     pos_builder_list = []
     for _, row in df_spot.iterrows():
         ts = row["timestamp"]
         spot = row["close"]
 
-        # Find closest ATM strike for this specific candle
+        # Dynamic rolling ATM calculation per candle
         closest_idx = min(
             range(len(strikes)), key=lambda i: abs(strikes[i] - spot)
         )
@@ -244,19 +260,24 @@ def build_options_apex_dataset(timeframe, num_strikes, selected_expiry):
         end_i = min(len(strikes), closest_idx + num_strikes + 1)
         selected_items = chain_sorted[start_i:end_i]
 
-        call_diff_sum = 0
-        put_diff_sum = 0
+        call_weighted_sum = 0
+        put_weighted_sum = 0
 
         for item in selected_items:
+            strike = item.get("strike_price", spot)
             c_key = item.get("call_options", {}).get("instrument_key")
             p_key = item.get("put_options", {}).get("instrument_key")
 
-            if c_key in oi_map and ts in oi_map[c_key].index:
-                call_diff_sum += oi_map[c_key].loc[ts]
-            if p_key in oi_map and ts in oi_map[p_key].index:
-                put_diff_sum += oi_map[p_key].loc[ts]
+            c_delta = get_approx_delta(strike, spot, is_call=True)
+            p_delta = get_approx_delta(strike, spot, is_call=False)
 
-        pos_builder_list.append(put_diff_sum - call_diff_sum)
+            if c_key in oi_map and ts in oi_map[c_key].index:
+                call_weighted_sum += oi_map[c_key].loc[ts] * c_delta
+            if p_key in oi_map and ts in oi_map[p_key].index:
+                put_weighted_sum += oi_map[p_key].loc[ts] * p_delta
+
+        # Net Delta Point Movement Formula: (Delta-Weighted Put ΔOI - Delta-Weighted Call ΔOI)
+        pos_builder_list.append(put_weighted_sum - call_weighted_sum)
 
     df_spot["pos_builder"] = pos_builder_list
     df_spot["color"] = df_spot["pos_builder"].apply(
