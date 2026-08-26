@@ -1,21 +1,22 @@
 import concurrent.futures
 from datetime import datetime
 import urllib.parse
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import requests
 import streamlit as st
 
+# ==========================================
+# PAGE CONFIG & LAYOUT
+# ==========================================
 st.set_page_config(
     layout="wide",
     page_title="Nifty 50 Chart",
     page_icon="📈",
 )
 
-# ==========================================
-# CSS: INJECT REAL TRADINGVIEW CROSSHAIR
-# ==========================================
 st.markdown(
     """
     <style>
@@ -29,22 +30,38 @@ st.markdown(
         div.block-container {
             padding-top: 0.1rem !important;
             padding-bottom: 0rem !important;
-            padding-left: 0.5rem !important;
-            padding-right: 0.5rem !important;
+            padding-left: 0.8rem !important;
+            padding-right: 0.8rem !important;
             max-width: 100% !important;
         }
         
-        /* Metric cards styling */
+        div[data-testid="stVerticalBlock"] > div { gap: 0.1rem !important; }
+        div[data-testid="column"] { padding: 0px 2px !important; }
+        
+        div[data-baseweb="select"] > div {
+            background-color: #1e222d !important;
+            border: 1px solid #363c4e !important;
+            color: #d1d4dc !important;
+            border-radius: 4px;
+            min-height: 28px !important;
+            height: 28px !important;
+        }
+        div[data-baseweb="select"] span {
+            color: #d1d4dc !important;
+            font-weight: 600 !important;
+            font-size: 12px !important;
+        }
+        
         .metric-card {
             background-color: #131722;
             border: 1px solid #2a2e39;
             border-radius: 4px;
             padding: 4px 10px;
-            margin-bottom: 4px;
+            margin-bottom: 2px;
         }
         .metric-label {
             color: #787b86;
-            font-size: 10px;
+            font-size: 9px;
             font-weight: 600;
             text-transform: uppercase;
         }
@@ -53,19 +70,12 @@ st.markdown(
             font-weight: 700;
             color: #d1d4dc;
         }
-
-        /* Force unified vertical crosshair across the canvas */
-        .js-plotly-plot .plotly .spikeline {
-            stroke: #787b86 !important;
-            stroke-width: 1px !important;
-            stroke-dasharray: 3px, 3px !important;
-        }
     </style>
 """,
     unsafe_allow_html=True,
 )
 
-UPSTOX_TOKEN = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2M0FZSEUiLCJqdGkiOiI2YThkNTc1Y2Y4MTJmNjA0MzcxZDNlM2MiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc4NzY0NzgzNiwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzg3Njk1MjAwfQ.Z4zP9w3MecFeZEcX5sUt4YdhxS6skp25fbKOv8-_gPU"
+UPSTOX_TOKEN = "YOUR_UPSTOX_TOKEN_HERE"
 SPOT_KEY = "NSE_INDEX|Nifty 50"
 
 HTTP_SESSION = requests.Session()
@@ -76,7 +86,9 @@ HTTP_SESSION.headers.update(
     }
 )
 
-
+# ==========================================
+# DATA FETCHING ENGINE
+# ==========================================
 def fetch_raw_1min_candles(instrument_key):
     encoded_key = urllib.parse.quote(instrument_key)
     url = f"https://api.upstox.com/v2/historical-candle/intraday/{encoded_key}/1minute"
@@ -88,24 +100,13 @@ def fetch_raw_1min_candles(instrument_key):
                 return pd.DataFrame()
             df = pd.DataFrame(
                 candles,
-                columns=[
-                    "timestamp",
-                    "open",
-                    "high",
-                    "low",
-                    "close",
-                    "vol",
-                    "oi",
-                ],
+                columns=["timestamp", "open", "high", "low", "close", "vol", "oi"],
             )
-            df["timestamp"] = pd.to_datetime(df["timestamp"]).dt.tz_localize(
-                None
-            )
+            df["timestamp"] = pd.to_datetime(df["timestamp"]).dt.tz_localize(None)
             return df.sort_values("timestamp").reset_index(drop=True)
     except Exception:
         pass
     return pd.DataFrame()
-
 
 def resample_candles(df, timeframe="3min"):
     if df.empty:
@@ -128,6 +129,18 @@ def resample_candles(df, timeframe="3min"):
         .reset_index()
     )
 
+def get_expiry_dates(spot_key):
+    encoded_key = urllib.parse.quote(spot_key)
+    url = f"https://api.upstox.com/v2/option/chain?instrument_key={encoded_key}"
+    try:
+        res = HTTP_SESSION.get(url, timeout=5)
+        if res.status_code == 200:
+            expiries = sorted(list({item["expiry"] for item in res.json().get("data", []) if "expiry" in item}))
+            if expiries:
+                return expiries
+    except Exception:
+        pass
+    return [datetime.now().strftime("%Y-%m-%d")]
 
 def fetch_option_chain(spot_key, expiry_date):
     encoded_key = urllib.parse.quote(spot_key)
@@ -140,13 +153,12 @@ def fetch_option_chain(spot_key, expiry_date):
         pass
     return []
 
-
 def fetch_strike_oi_parallel(keys, timeframe):
     def worker(key):
         df_1m = fetch_raw_1min_candles(key)
         if not df_1m.empty:
             df_res = resample_candles(df_1m, timeframe)
-            df_res["oi_diff"] = df_res["oi"].diff().fillna(0)
+            df_res["oi_diff"] = df_res["oi"].diff().fillna(df_res["oi"])
             return df_res[["timestamp", "oi_diff"]]
         return pd.DataFrame()
 
@@ -159,116 +171,104 @@ def fetch_strike_oi_parallel(keys, timeframe):
                 results.append(res)
 
     if results:
-        return (
-            pd.concat(results)
-            .groupby("timestamp", as_index=False)["oi_diff"]
-            .sum()
-        )
+        return pd.concat(results).groupby("timestamp", as_index=False)["oi_diff"].sum()
     return pd.DataFrame()
 
-
-def get_data(timeframe, num_strikes):
-    df_spot = resample_candles(fetch_raw_1min_candles(SPOT_KEY), timeframe)
-    if df_spot.empty:
+def build_dataset(timeframe, num_strikes, selected_expiry):
+    df_spot_1m = fetch_raw_1min_candles(SPOT_KEY)
+    if df_spot_1m.empty:
         return pd.DataFrame()
 
-    # Default fallback calculation if chain fails
-    chain = fetch_option_chain(SPOT_KEY, datetime.now().strftime("%Y-%m-%d"))
+    df_spot = resample_candles(df_spot_1m, timeframe)
+    chain = fetch_option_chain(SPOT_KEY, selected_expiry)
+
     if chain:
+        chain = sorted(chain, key=lambda x: x.get("strike_price", 0))
         spot_price = df_spot["close"].iloc[-1]
-        chain_sorted = sorted(chain, key=lambda x: x.get("strike_price", 0))
-        closest_idx = min(
-            range(len(chain_sorted)),
-            key=lambda i: abs(chain_sorted[i]["strike_price"] - spot_price),
-        )
-        selected = chain_sorted[
-            max(0, closest_idx - num_strikes) : min(
-                len(chain_sorted), closest_idx + num_strikes + 1
-            )
-        ]
+        closest_idx = min(range(len(chain)), key=lambda i: abs(chain[i]["strike_price"] - spot_price))
+        
+        selected = chain[max(0, closest_idx - num_strikes): min(len(chain), closest_idx + num_strikes + 1)]
+        call_keys = [item["call_options"]["instrument_key"] for item in selected if "call_options" in item]
+        put_keys = [item["put_options"]["instrument_key"] for item in selected if "put_options" in item]
 
-        c_keys = [
-            i["call_options"]["instrument_key"]
-            for i in selected
-            if "call_options" in i
-        ]
-        p_keys = [
-            i["put_options"]["instrument_key"]
-            for i in selected
-            if "put_options" in i
-        ]
+        df_calls = fetch_strike_oi_parallel(call_keys, timeframe)
+        df_puts = fetch_strike_oi_parallel(put_keys, timeframe)
 
-        df_c = fetch_strike_oi_parallel(c_keys, timeframe)
-        df_p = fetch_strike_oi_parallel(p_keys, timeframe)
-
-        if not df_c.empty and not df_p.empty:
-            merged = pd.merge(
-                df_spot,
-                df_c.rename(columns={"oi_diff": "c_oi"}),
-                on="timestamp",
-                how="left",
-            )
-            merged = pd.merge(
-                merged,
-                df_p.rename(columns={"oi_diff": "p_oi"}),
-                on="timestamp",
-                how="left",
-            )
-            raw = merged["p_oi"].fillna(0) - merged["c_oi"].fillna(0)
-            max_val = raw.abs().max()
-            merged["pos_builder"] = (
-                (raw / max_val) * 180.0 if max_val > 0 else raw
-            )
+        if not df_calls.empty and not df_puts.empty:
+            merged = pd.merge(df_spot, df_calls.rename(columns={"oi_diff": "call_oi_diff"}), on="timestamp", how="left")
+            merged = pd.merge(merged, df_puts.rename(columns={"oi_diff": "put_oi_diff"}), on="timestamp", how="left")
+            merged["call_oi_diff"] = merged["call_oi_diff"].fillna(0)
+            merged["put_oi_diff"] = merged["put_oi_diff"].fillna(0)
+            
+            raw_pb = merged["put_oi_diff"] - merged["call_oi_diff"]
+            max_val = raw_pb.abs().max()
+            merged["pos_builder"] = (raw_pb / max_val * 180.0) if max_val > 0 else raw_pb
         else:
-            df_spot["pos_builder"] = 0
-            merged = df_spot
+            merged = df_spot.copy()
+            merged["pos_builder"] = (merged["close"] - merged["open"]) * 10
     else:
-        df_spot["pos_builder"] = (df_spot["close"] - df_spot["open"]) * 10
-        merged = df_spot
+        merged = df_spot.copy()
+        merged["pos_builder"] = (merged["close"] - merged["open"]) * 10
 
-    merged["color"] = merged["pos_builder"].apply(
-        lambda x: "#089981" if x >= 0 else "#f23645"
-    )
+    merged["color"] = merged["pos_builder"].apply(lambda x: "#089981" if x >= 0 else "#f23645")
     return merged
 
+# ==========================================
+# TOP CONTROL BAR
+# ==========================================
+top_bar = st.container()
+with top_bar:
+    c1, c2, c3, c4, _ = st.columns([2.5, 1.2, 1.2, 2.0, 3.1])
+    with c1:
+        st.markdown("<h4 style='margin:0; font-size:16px; color:#f0f3fa;'>NIFTY 50</h4>", unsafe_allow_html=True)
+    with c2:
+        tf_option = st.selectbox("TF", options=["3min", "5min"], index=0, key="tf_s", label_visibility="collapsed")
+    with c3:
+        strike_count = st.selectbox("Strikes", options=[3, 5, 10], index=0, key="st_s", label_visibility="collapsed")
+    with c4:
+        expiry_input = st.selectbox("Expiry", options=get_expiry_dates(SPOT_KEY), index=0, key="ex_s", label_visibility="collapsed")
 
 # ==========================================
-# MAIN INTERFACE & RENDER
+# CHART DISPLAY & UNIFIED CROSSHAIR
 # ==========================================
-df = get_data("3min", 3)
+df = build_dataset(tf_option, strike_count, expiry_input)
 
 if not df.empty:
-    last = df.iloc[-1]
+    last_row = df.iloc[-1]
+    
+    # Accurate Intraday Cumulative OI Bias
+    cumulative_net_delta = df["pos_builder"].sum()
+    bias_label = "BULLISH" if cumulative_net_delta >= 0 else "BEARISH"
+    bias_color = "#089981" if cumulative_net_delta >= 0 else "#f23645"
 
-    # TOP METRICS (Stripped High/Low as requested)
-    col1, col2, col3 = st.columns(3)
-    with col1:
+    # Only Spot Price, Net Delta, and OI Bias metrics are shown
+    m1, m2, m3 = st.columns(3)
+    with m1:
         st.markdown(
-            f"<div class='metric-card'><div class='metric-label'>Spot Price</div><div class='metric-val'>{last['close']:.2f}</div></div>",
+            f"""<div class='metric-card'><div class='metric-label'>Spot Price</div><div class='metric-val'>{last_row['close']:.2f}</div></div>""",
             unsafe_allow_html=True,
         )
-    with col2:
+    with m2:
         st.markdown(
-            f"<div class='metric-card'><div class='metric-label'>Net Position Delta</div><div class='metric-val' style='color:{last['color']};'>{last['pos_builder']:,.0f}</div></div>",
+            f"""<div class='metric-card'><div class='metric-label'>Net Position Delta</div><div class='metric-val' style='color:{last_row["color"]};'>{last_row['pos_builder']:,.0f}</div></div>""",
             unsafe_allow_html=True,
         )
-    with col3:
-        bias = "BULLISH" if last["pos_builder"] >= 0 else "BEARISH"
+    with m3:
         st.markdown(
-            f"<div class='metric-card'><div class='metric-label'>OI Bias</div><div class='metric-val' style='color:{last['color']};'>{bias}</div></div>",
+            f"""<div class='metric-card'><div class='metric-label'>OI Bias</div><div class='metric-val' style='color:{bias_color};'>{bias_label}</div></div>""",
             unsafe_allow_html=True,
         )
 
-    # SUBPLOT SETUP WITH SHARED X-AXIS
+    # Subplots linked together on x-axis
     fig = make_subplots(
         rows=2,
         cols=1,
         shared_xaxes=True,
         vertical_spacing=0.0,
-        row_heights=[0.7, 0.3],
+        row_heights=[0.72, 0.28],
     )
 
-    # Candlestick (Hover info stripped)
+    # Main Price Chart
     fig.add_trace(
         go.Candlestick(
             x=df["timestamp"],
@@ -281,72 +281,64 @@ if not df.empty:
             decreasing_line_color="#f23645",
             increasing_fillcolor="#089981",
             decreasing_fillcolor="#f23645",
-            hoverinfo="x",  # Removes OHLC text overlay
         ),
         row=1,
         col=1,
     )
 
-    # Histogram
+    # Position Builder Subplot
     fig.add_trace(
         go.Bar(
             x=df["timestamp"],
             y=df["pos_builder"],
             marker_color=df["color"],
+            marker_line_width=0,
             name="Position Builder",
-            hoverinfo="x+y",
         ),
         row=2,
         col=1,
     )
 
-    # LAYOUT AND FULL CROSSHAIR OVERLAY
+    # SINGLE UNIFIED CROSSHAIR CONFIGURATION
     fig.update_layout(
         template="plotly_dark",
         paper_bgcolor="#0d1117",
         plot_bgcolor="#0d1117",
-        margin=dict(l=10, r=40, t=10, b=10),
-        height=580,
-        hovermode="x",  # Single vertical crosshair mode
-        showlegend=False,
+        margin=dict(l=10, r=50, t=10, b=10),
+        height=560,
+        dragmode="pan",
         xaxis_rangeslider_visible=False,
+        hovermode="x unified",
+        showlegend=False,
     )
 
-    # Synchronize Spikes for Vertical Line Linking
-    spike_config = dict(
+    # Forces horizontal crosshair line to project straight across both subplots
+    fig.update_xaxes(
+        showgrid=True,
+        gridcolor="#21262d",
         showspikes=True,
         spikemode="across",
         spikesnap="cursor",
-        spikecolor="#8b949e",
+        spikecolor="#ffffff",
         spikethickness=1,
         spikedash="dash",
-        showgrid=True,
-        gridcolor="#21262d",
     )
 
-    fig.update_xaxes(**spike_config)
     fig.update_yaxes(
-        showgrid=True,
-        gridcolor="#21262d",
-        side="right",
-        row=1,
-        col=1,
+        showgrid=True, gridcolor="#21262d", side="right", tickfont=dict(color="#8b949e", size=10), row=1, col=1
     )
     fig.update_yaxes(
-        range=[-200, 200],
-        showgrid=True,
-        gridcolor="#21262d",
-        zerolinecolor="#30363d",
-        side="right",
-        row=2,
-        col=1,
+        range=[-220, 220], showgrid=True, gridcolor="#21262d", zeroline=True, zerolinecolor="#30363d", side="right", tickfont=dict(color="#8b949e", size=10), row=2, col=1
     )
 
     st.plotly_chart(
         fig,
         use_container_width=True,
         config={
-            "displayModeBar": False,
+            "displayModeBar": True,
             "scrollZoom": True,
+            "displaylogo": False,
         },
     )
+else:
+    st.error("Market data unavailable.")
