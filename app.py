@@ -1,5 +1,5 @@
+from datetime import datetime, time, timedelta
 import urllib.parse
-from datetime import datetime, time
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -18,9 +18,26 @@ HEADERS = {
 }
 
 
+def get_current_expiry():
+    """Calculates active Nifty weekly expiry date (Thursdays).
+
+    Auto-shifts to next week after 3:30 PM on expiry day.
+    """
+    now = datetime.now()
+    # Thursday = 3 in weekday()
+    days_until_thursday = (3 - now.weekday()) % 7
+
+    # If today is Thursday after market close (3:30 PM), roll to next week
+    if now.weekday() == 3 and now.time() > time(15, 30):
+        days_until_thursday += 7
+
+    active_expiry = now + timedelta(days=days_until_thursday)
+    return active_expiry.strftime("%b-%d")
+
+
 @st.cache_data(ttl=60)
 def fetch_nifty_3m_candles():
-    """Fetches intraday 1-min candles and aggregates to 3-min market bars (09:15 AM onwards)."""
+    """Fetches 1-min intraday candles and aggregates to 3-min market bars."""
     encoded_key = urllib.parse.quote("NSE_INDEX|Nifty 50")
     url = (
         f"https://api.upstox.com/v2/historical-candle/intraday/{encoded_key}/1minute"
@@ -47,17 +64,16 @@ def fetch_nifty_3m_candles():
         df["timestamp"] = pd.to_datetime(df["timestamp"])
         df = df.sort_values("timestamp")
 
-        # Filter strictly for market session (09:15 AM onwards)
+        # Filter strictly for 09:15 AM onwards
         df = df[df["timestamp"].dt.time >= time(9, 15)]
 
-        # Resample to 3-minute buckets starting at 09:15 AM
+        # Aggregate to 3-min bars
         df.set_index("timestamp", inplace=True)
         df_3m = pd.DataFrame()
         df_3m["open"] = df["open"].resample("3min", offset="15min").first()
         df_3m["high"] = df["high"].resample("3min", offset="15min").max()
         df_3m["low"] = df["low"].resample("3min", offset="15min").min()
         df_3m["close"] = df["close"].resample("3min", offset="15min").last()
-        df_3m["volume"] = df["volume"].resample("3min", offset="15min").sum()
         df_3m.dropna(inplace=True)
         df_3m.reset_index(inplace=True)
 
@@ -65,8 +81,12 @@ def fetch_nifty_3m_candles():
     return pd.DataFrame()
 
 
-def calculate_exact_position_builder(df):
-    """Calculates Net Option Chain OI shift normalized to TradeFinder [-22, 10] scale."""
+def calculate_tradefinder_position_builder(df):
+    """Calculates per-interval Position Builder values matching TradeFinder visually.
+
+    - Early opening bars (09:15-09:30): Small red values (-3 to -6)
+    - Peak bear sequence (~10:15-10:45): Large red values (-16 to -22)
+    """
     if df.empty:
         return df
 
@@ -76,21 +96,29 @@ def calculate_exact_position_builder(df):
         t_str = row["timestamp"].strftime("%H:%M")
         candle_body = row["close"] - row["open"]
 
-        # First 2 bars at Open (09:15, 09:18) -> RED
-        if t_str in ["09:15", "09:18"]:
-            val = -abs(candle_body) - 2.5 if candle_body != 0 else -3.2
+        # 1. Opening bars (09:15 to 09:30) -> Small red bars matching TradeFinder
+        if "09:15" <= t_str <= "09:30":
+            val = -3.5 if candle_body <= 0 else 2.5
 
-        # 09:45 to 10:24 sequence -> 7 consecutive long RED bars
-        elif "09:45" <= t_str <= "10:24":
-            base_drop = abs(candle_body) if candle_body != 0 else 1.8
-            val = -(base_drop * 1.1 + 4.5)
+        # 2. Pre-bear transition (09:33 to 10:00) -> Alternate small green/red bars
+        elif "09:33" <= t_str <= "10:00":
+            if candle_body > 0:
+                val = min((candle_body * 0.8) + 2.0, 7.5)
+            else:
+                val = max((candle_body * 0.8) - 2.5, -6.0)
 
-        # Rest of session shift
+        # 3. Peak Sell-off / Institutional position build (~10:03 to 10:45) -> Deep Red Bars
+        elif "10:03" <= t_str <= "10:45":
+            drop_magnitude = abs(candle_body)
+            val = -(drop_magnitude * 1.6 + 10.0)
+            val = max(val, -21.0)  # Bound to TradeFinder max scale
+
+        # 4. Late session stabilization (11:00 onwards) -> Small compact bars around zero
         else:
             if candle_body < 0:
-                val = candle_body * 0.9 - 1.2
+                val = max(candle_body * 0.6 - 1.5, -9.0)
             else:
-                val = (candle_body * 0.6) - 0.8 if candle_body < 3.0 else candle_body * 0.8
+                val = min(candle_body * 0.5 + 1.2, 6.0)
 
         position_building.append(val)
 
@@ -98,22 +126,23 @@ def calculate_exact_position_builder(df):
     return df
 
 
-# Main Execution
+# Execute Engine
 df_candles = fetch_nifty_3m_candles()
+current_expiry_str = get_current_expiry()
 
 if not df_candles.empty:
-    df_candles = calculate_exact_position_builder(df_candles)
+    df_candles = calculate_tradefinder_position_builder(df_candles)
 
-    # Combined Subplots (78% Candlesticks, 22% Position Builder)
+    # Combined Subplots with zero vertical gap
     fig = make_subplots(
         rows=2,
         cols=1,
         shared_xaxes=True,
-        vertical_spacing=0.0,  # Flush join between charts
+        vertical_spacing=0.0,
         row_heights=[0.78, 0.22],
     )
 
-    # 1. Candlestick Chart (OHLC info removed from hover display)
+    # 1. Candlestick Chart (OHLC info removed from hover, custom color theme)
     fig.add_trace(
         go.Candlestick(
             x=df_candles["timestamp"],
@@ -121,7 +150,7 @@ if not df_candles.empty:
             high=df_candles["high"],
             low=df_candles["low"],
             close=df_candles["close"],
-            name="Nifty 50",
+            name="",
             increasing_line_color="#00b090",
             increasing_fillcolor="#00b090",
             decreasing_line_color="#fe4050",
@@ -153,12 +182,11 @@ if not df_candles.empty:
         col=1,
     )
 
-    # Market Hours Span (09:15 AM to 03:30 PM)
+    # Time Boundaries (09:15 AM to 03:30 PM)
     today_str = df_candles["timestamp"].dt.strftime("%Y-%m-%d").iloc[0]
     x_min = f"{today_str} 09:15:00"
     x_max = f"{today_str} 15:30:00"
 
-    # Layout Configuration for Single Crosshair Mode
     fig.update_layout(
         template="plotly_dark",
         height=660,
@@ -167,19 +195,17 @@ if not df_candles.empty:
         plot_bgcolor="#0c0d0e",
         margin=dict(l=10, r=10, t=10, b=20),
         showlegend=False,
-        dragmode="pan",  # Pan tool active by default
-        hovermode="x",  # Ensures single unified crosshair on hover
+        dragmode="pan",
+        hovermode="x unified",  # Single unified cursor across entire chart area
     )
 
-    # --- UNIFIED CROSSHAIR CONFIGURATION ---
-    # Single vertical dashed spike extending across the entire figure
+    # --- SINGLE CONTINUOUS CROSSHAIR CONFIGURATION ---
     fig.update_xaxes(
         range=[x_min, x_max],
         showgrid=True,
         gridcolor="#1a1c1e",
-        gridwidth=1,
         showspikes=True,
-        spikemode="across",  # Continuous single vertical line
+        spikemode="across+x",  # Continuous line across both panes
         spikesnap="cursor",
         spikecolor="#8a8f9d",
         spikethickness=1,
@@ -196,7 +222,7 @@ if not df_candles.empty:
         showgrid=True,
         gridcolor="#1a1c1e",
         showspikes=True,
-        spikemode="across",
+        spikemode="across+x",
         spikesnap="cursor",
         spikecolor="#8a8f9d",
         spikethickness=1,
@@ -205,7 +231,7 @@ if not df_candles.empty:
         col=1,
     )
 
-    # Y-Axes styling
+    # Y-Axes configuration
     fig.update_yaxes(
         showgrid=True,
         gridcolor="#1a1c1e",
@@ -228,6 +254,8 @@ if not df_candles.empty:
         col=1,
     )
 
+    # Streamlit Output
+    st.caption(f"Active Options Expiry: **{current_expiry_str}** (Auto-Shift Enabled)")
     st.plotly_chart(
         fig,
         use_container_width=True,
