@@ -2,14 +2,13 @@ import gzip
 import io
 from datetime import datetime
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import pytz
 import requests
 import streamlit as st
-from zoneinfo import ZoneInfo
 
 # ================================================================
 # CONFIGURATION & CONSTANTS
@@ -71,7 +70,6 @@ def get_nifty_index_intraday(token):
         columns=["timestamp", "open", "high", "low", "close", "volume", "oi"],
     )
 
-    # CONVERT TO IST TIMEZONE
     df["timestamp"] = (
         pd.to_datetime(df["timestamp"]).dt.tz_convert(IST).dt.tz_localize(None)
     )
@@ -108,8 +106,11 @@ def fetch_upstox_nifty_instruments():
         )
         name_col = "name" if "name" in df.columns else "asset_symbol"
 
-        mask = df[name_col].astype(str).str.upper() == "NIFTY"
+        mask = df[name_col].astype(str).str.upper().isin(["NIFTY", "NIFTY50"])
         nifty_df = df[mask].copy()
+
+        if nifty_df.empty:
+            raise Exception("No NIFTY records found in Upstox Master CSV.")
 
         nifty_df["expiry_dt"] = pd.to_datetime(nifty_df["expiry"])
         today = pd.Timestamp(datetime.now().date())
@@ -118,28 +119,31 @@ def fetch_upstox_nifty_instruments():
             nifty_df["expiry_dt"].dt.date >= today.date()
         ].sort_values("expiry_dt")
 
+        if active_df.empty:
+            active_df = nifty_df.sort_values("expiry_dt", ascending=False)
+
         # 1. Futures Contract
         futs = active_df[
             active_df[type_col].astype(str).str.upper().str.contains("FUT")
         ]
-        fut_key, fut_sym = (
-            (futs.iloc[0][key_col], futs.iloc[0][sym_col])
-            if not futs.empty
-            else (None, None)
-        )
+        fut_key = futs.iloc[0][key_col] if not futs.empty else None
+        fut_sym = futs.iloc[0][sym_col] if not futs.empty else "NIFTY FUT"
 
-        # 2. Nearest Expiry Options Contracts (Weekly)
+        # 2. Options Contracts
         opts = active_df[
             active_df[type_col].astype(str).str.upper().isin(["CE", "PE"])
         ]
-        nearest_expiry = (
-            opts.iloc[0]["expiry_dt"] if not opts.empty else None
-        )
+
+        if opts.empty:
+            raise Exception("No active NIFTY Options found in master file.")
+
+        nearest_expiry = opts.iloc[0]["expiry_dt"]
+        matching_opts = opts[opts["expiry_dt"] == nearest_expiry].copy()
 
         return (
             fut_key,
             fut_sym,
-            opts[opts["expiry_dt"] == nearest_expiry],
+            matching_opts,
             key_col,
             sym_col,
         )
@@ -149,25 +153,30 @@ def fetch_upstox_nifty_instruments():
 
 
 def get_derivative_intraday(token, instrument_key):
-    encoded_key = quote(instrument_key, safe="")
-    url = f"https://api.upstox.com/v3/historical-candle/intraday/{encoded_key}/minutes/{INTERVAL}"
-
-    res = upstox_get(url, token)
-    candles = res.get("data", {}).get("candles", [])
-
-    if not candles:
+    if not instrument_key:
         return pd.DataFrame()
 
-    df = pd.DataFrame(
-        candles,
-        columns=["timestamp", "open", "high", "low", "close", "volume", "oi"],
-    )
+    encoded_key = quote(str(instrument_key), safe="")
+    url = f"https://api.upstox.com/v3/historical-candle/intraday/{encoded_key}/minutes/{INTERVAL}"
 
-    # CONVERT TO IST TIMEZONE
-    df["timestamp"] = (
-        pd.to_datetime(df["timestamp"]).dt.tz_convert(IST).dt.tz_localize(None)
-    )
-    return df.sort_values("timestamp").reset_index(drop=True)
+    try:
+        res = upstox_get(url, token)
+        candles = res.get("data", {}).get("candles", [])
+
+        if not candles:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(
+            candles,
+            columns=["timestamp", "open", "high", "low", "close", "volume", "oi"],
+        )
+
+        df["timestamp"] = (
+            pd.to_datetime(df["timestamp"]).dt.tz_convert(IST).dt.tz_localize(None)
+        )
+        return df.sort_values("timestamp").reset_index(drop=True)
+    except Exception:
+        return pd.DataFrame()
 
 
 def filter_market_hours(df):
@@ -324,7 +333,6 @@ def render_chart(df, source_label):
 
     ax_price.tick_params(labelbottom=False)
 
-    # DISPLAY IST TIME ON X-AXIS
     ax_position.xaxis.set_major_locator(mdates.MinuteLocator(interval=30))
     ax_position.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
 
@@ -347,22 +355,27 @@ try:
             fetch_upstox_nifty_instruments()
         )
 
-        if "Weekly" in data_source_mode:
-            # Aggregate OI across near-the-money options contracts for the current weekly expiry
+        if "Weekly" in data_source_mode and not opts_df.empty:
             last_close = idx_df["close"].iloc[-1]
-            opts_df["strike"] = pd.to_numeric(
-                opts_df.get("strike_price", opts_df.get("strike")),
-                errors="coerce",
+
+            strike_col = (
+                "strike_price" if "strike_price" in opts_df.columns else "strike"
+            )
+            opts_df["strike_num"] = pd.to_numeric(
+                opts_df[strike_col], errors="coerce"
             )
 
-            # Filter strikes around current price (+- 300 pts) to match active open interest movements
+            # Filter ATM range +- 400 pts
             atm_opts = opts_df[
-                (opts_df["strike"] >= last_close - 300)
-                & (opts_df["strike"] <= last_close + 300)
+                (opts_df["strike_num"] >= last_close - 400)
+                & (opts_df["strike_num"] <= last_close + 400)
             ]
 
+            if atm_opts.empty:
+                atm_opts = opts_df
+
             combined_oi_df = None
-            for _, row in atm_opts.head(6).iterrows():
+            for _, row in atm_opts.head(10).iterrows():
                 opt_data = filter_market_hours(
                     get_derivative_intraday(ACCESS_TOKEN, row[key_col])
                 )
@@ -374,8 +387,16 @@ try:
                     else:
                         combined_oi_df["oi"] += opt_data["oi"]
 
-            target_deriv_df = combined_oi_df
-            source_tag = f"NIFTY Weekly Expiry Options ({opts_df.iloc[0]['expiry_dt'].strftime('%b-%d')})"
+            if combined_oi_df is None or combined_oi_df.empty:
+                # Fallback to Futures if options intraday fail
+                target_deriv_df = filter_market_hours(
+                    get_derivative_intraday(ACCESS_TOKEN, fut_key)
+                )
+                source_tag = f"{fut_sym} (Fallback)"
+            else:
+                target_deriv_df = combined_oi_df
+                exp_date_str = opts_df.iloc[0]["expiry_dt"].strftime("%b-%d")
+                source_tag = f"NIFTY Weekly Expiry Options ({exp_date_str})"
         else:
             target_deriv_df = filter_market_hours(
                 get_derivative_intraday(ACCESS_TOKEN, fut_key)
