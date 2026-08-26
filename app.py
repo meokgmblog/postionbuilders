@@ -95,7 +95,6 @@ HEADERS = {
 def upstox_get(url, params=None):
 
     try:
-
         response = requests.get(
             url,
             headers=HEADERS,
@@ -104,35 +103,41 @@ def upstox_get(url, params=None):
         )
 
     except requests.exceptions.RequestException as e:
-
         raise RuntimeError(
-            f"Network error while connecting to Upstox: {e}"
+            f"NETWORK ERROR: {str(e)}"
         )
 
-    # ------------------------------------------------------------
-    # SUCCESS
-    # ------------------------------------------------------------
+    # Do NOT expose access token
+    safe_url = url
 
-    if response.status_code == 200:
+    print("\n================ UPSTOX DEBUG ================")
+    print("HTTP STATUS:", response.status_code)
+    print("URL:", safe_url)
+    print("PARAMS:", params)
+    print("RESPONSE:", response.text[:2000])
+    print("===============================================\n")
 
-        try:
-            data = response.json()
+    if response.status_code != 200:
 
-        except Exception:
+        raise RuntimeError(
+            f"UPSTOX HTTP {response.status_code}: "
+            f"{response.text[:1000]}"
+        )
 
-            raise RuntimeError(
-                "Upstox returned HTTP 200 but response "
-                "was not valid JSON."
-            )
+    try:
+        data = response.json()
+    except Exception:
+        raise RuntimeError(
+            "Upstox returned non-JSON response."
+        )
 
-        if data.get("status") != "success":
+    if data.get("status") != "success":
 
-            raise RuntimeError(
-                f"Upstox API returned unsuccessful response: "
-                f"{data}"
-            )
+        raise RuntimeError(
+            f"UPSTOX API ERROR: {data}"
+        )
 
-        return data
+    return data
 
     # ------------------------------------------------------------
     # ERROR
