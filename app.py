@@ -10,19 +10,13 @@ import requests
 import streamlit as st
 
 # ================================================================
-# STREAMLIT CONFIG & SETTINGS
+# CONFIGURATION & CONSTANTS
 # ================================================================
 st.set_page_config(page_title="NIFTY 50 Position Builder", layout="wide")
 st.title("📈 NIFTY 50 - 3 Minute Position Builder")
 
-DEFAULT_TOKEN = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI6M0FZSEUiLCJqdGkiOiI6YThkNTc1Y2Y4MTJmNjA0MzcxZDNlM2MiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc4NzY0NzgzNiwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzg3Njk1MjAwfQ.Z4zP9w3MecFeZEcX5sUt4YdhxS6skp25fbKOv8-_gPU"
-
-access_token_input = st.text_input(
-    "Upstox Access Token",
-    value=DEFAULT_TOKEN,
-    type="password",
-    help="Enter your active Upstox Bearer Access Token",
-)
+# Hardcoded Access Token (UI input removed)
+ACCESS_TOKEN = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI6M0FZSEUiLCJqdGkiOiI6YThkNTc1Y2Y4MTJmNjA0MzcxZDNlM2MiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc4NzY0NzgzNiwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzg3Njk1MjAwfQ.Z4zP9w3MecFeZEcX5sUt4YdhxS6skp25fbKOv8-_gPU"
 
 NIFTY_INDEX_KEY = "NSE_INDEX|Nifty 50"
 INTERVAL = 3
@@ -81,43 +75,52 @@ def get_nifty_index_intraday(token):
 @st.cache_data(ttl=3600)
 def fetch_upstox_nifty_futures_key():
     """
-    Downloads Upstox official NSE_FO master file to find the active NIFTY Future instrument key.
-    Cached for 1 hour to ensure fast app execution.
+    Downloads Upstox official NSE master instrument list with fallback column checks.
     """
     url = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.csv.gz"
     
     try:
         res = requests.get(url, timeout=30)
         if res.status_code != 200:
-            raise Exception("Failed to fetch Upstox instrument file.")
+            raise Exception(f"HTTP {res.status_code} while downloading master file.")
             
         with gzip.open(io.BytesIO(res.content), "rt") as f:
             df = pd.read_csv(f)
-            
+
+        # Standardize column headers to lowercase
+        df.columns = [c.lower() for c in df.columns]
+
+        # Identify key columns flexibly
+        type_col = "instrument_type" if "instrument_type" in df.columns else "segment"
+        key_col = "instrument_key" if "instrument_key" in df.columns else "instrument_token"
+        sym_col = "trading_symbol" if "trading_symbol" in df.columns else "tradingsymbol"
+        name_col = "name" if "name" in df.columns else "asset_symbol"
+
         # Filter strictly for NIFTY Futures
-        nifty_futs = df[
-            (df["name"] == "NIFTY") & 
-            (df["instrument_type"] == "FUT") & 
-            (df["segment"] == "NSE_FO")
-        ].copy()
-        
+        mask = (
+            (df[name_col].astype(str).str.upper() == "NIFTY") & 
+            (df[type_col].astype(str).str.upper().str.contains("FUT"))
+        )
+        nifty_futs = df[mask].copy()
+
         if nifty_futs.empty:
-            raise Exception("No NIFTY Futures found in master file.")
+            raise Exception("No matching NIFTY Futures contracts found in master file.")
 
         nifty_futs["expiry_dt"] = pd.to_datetime(nifty_futs["expiry"])
         today = pd.Timestamp(datetime.now().date())
         
-        # Select active contract with nearest expiry
+        # Select active contract with nearest future expiry
         active_futs = nifty_futs[nifty_futs["expiry_dt"].dt.date >= today.date()].sort_values("expiry_dt")
         
         if active_futs.empty:
-            raise Exception("No active unexpired NIFTY Futures found.")
+            # Fallback to absolute latest contract if all are expired today
+            active_futs = nifty_futs.sort_values("expiry_dt", ascending=False)
 
         selected = active_futs.iloc[0]
-        return selected["instrument_key"], selected["trading_symbol"]
+        return str(selected[key_col]), str(selected[sym_col])
 
     except Exception as e:
-        raise RuntimeError(f"Failed to resolve NIFTY Future instrument key from Upstox Master File: {str(e)}")
+        raise RuntimeError(f"Failed to resolve NIFTY Future key: {str(e)}")
 
 
 def get_nifty_future_intraday(token, future_key):
@@ -298,40 +301,34 @@ def render_chart(df, future_symbol):
 
 
 # ================================================================
-# MAIN ENTRYPOINT
+# AUTOMATIC RUN ON PAGE LOAD / REFRESH
 # ================================================================
-if st.button("Run Position Builder"):
-    token = access_token_input.strip() if access_token_input else ""
-    if not token:
-        st.error("Please enter your Upstox Access Token.")
-        st.stop()
-
-    try:
-        with st.spinner("Fetching NIFTY Index and active Futures contract..."):
-            idx_df = filter_market_hours(get_nifty_index_intraday(token))
-            fut_key, fut_symbol = fetch_upstox_nifty_futures_key()
-            fut_df = filter_market_hours(
-                get_nifty_future_intraday(token, fut_key)
-            )
-
-            builder_df = calculate_position_builder(idx_df, fut_df)
-
-        st.success(f"Connected successfully to {fut_symbol} (Key: {fut_key})")
-        render_chart(builder_df, fut_symbol)
-
-        st.subheader("Recent Position Builder Data")
-        st.dataframe(
-            builder_df[
-                [
-                    "timestamp",
-                    "close",
-                    "future_oi",
-                    "position_type",
-                    "position_builder_scaled",
-                ]
-            ].tail(15),
-            use_container_width=True,
+try:
+    with st.spinner("Fetching NIFTY Index and Active Futures data..."):
+        idx_df = filter_market_hours(get_nifty_index_intraday(ACCESS_TOKEN))
+        fut_key, fut_symbol = fetch_upstox_nifty_futures_key()
+        fut_df = filter_market_hours(
+            get_nifty_future_intraday(ACCESS_TOKEN, fut_key)
         )
 
-    except Exception as err:
-        st.error(f"Execution Error: {str(err)}")
+        builder_df = calculate_position_builder(idx_df, fut_df)
+
+    st.success(f"Connected to {fut_symbol} (Instrument Key: {fut_key})")
+    render_chart(builder_df, fut_symbol)
+
+    st.subheader("Recent Position Builder Data")
+    st.dataframe(
+        builder_df[
+            [
+                "timestamp",
+                "close",
+                "future_oi",
+                "position_type",
+                "position_builder_scaled",
+            ]
+        ].tail(15),
+        use_container_width=True,
+    )
+
+except Exception as err:
+    st.error(f"Execution Error: {str(err)}")
