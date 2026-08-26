@@ -13,10 +13,11 @@ import streamlit as st
 st.set_page_config(page_title="NIFTY 50 Position Builder", layout="wide")
 st.title("📈 NIFTY 50 - 3 Minute Position Builder")
 
-ACCESS_TOKEN = st.text_input(
+# Hide token input contents
+access_token_input = st.text_input(
     "Upstox Access Token",
-    value="eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI6M0FZSEUiLCJqdGkiOiI2YThkNTc1Y2Y4MTJmNjA0MzcxZDNlM2MiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc4NzY0NzgzNiwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzg3Njk1MjAwfQ.Z4zP9w3MecFeZEcX5sUt4YdhxS6skp25fbKOv8-_gPU",
     type="password",
+    help="Enter your active Upstox Bearer Access Token",
 )
 
 NIFTY_INDEX_KEY = "NSE_INDEX|Nifty 50"
@@ -25,19 +26,20 @@ MARKET_START = "09:15"
 MARKET_END = "15:30"
 HISTOGRAM_SCALE = 1000
 
-HEADERS = {
-    "Accept": "application/json",
-    "Authorization": f"Bearer {ACCESS_TOKEN}",
-}
-
-
 # ================================================================
 # API HELPERS
 # ================================================================
-def upstox_get(url, params=None):
+def get_headers(token):
+    return {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {token}",
+    }
+
+
+def upstox_get(url, token, params=None):
     try:
         response = requests.get(
-            url, headers=HEADERS, params=params, timeout=20
+            url, headers=get_headers(token), params=params, timeout=20
         )
     except requests.exceptions.RequestException as e:
         raise RuntimeError(f"Network Connection Error: {str(e)}")
@@ -54,11 +56,11 @@ def upstox_get(url, params=None):
     return data
 
 
-def get_nifty_index_intraday():
+def get_nifty_index_intraday(token):
     encoded_key = quote(NIFTY_INDEX_KEY, safe="")
     url = f"https://api.upstox.com/v3/historical-candle/intraday/{encoded_key}/minutes/{INTERVAL}"
 
-    res = upstox_get(url)
+    res = upstox_get(url, token)
     candles = res.get("data", {}).get("candles", [])
 
     if not candles:
@@ -72,65 +74,71 @@ def get_nifty_index_intraday():
     return df.sort_values("timestamp").reset_index(drop=True)
 
 
-def find_nearest_nifty_future():
-    # Primary attempt: Instrument Search
-    search_url = "https://api.upstox.com/v2/instruments/search"
-    queries_to_try = ["NIFTY", "NSE_FO|NIFTY"]
+def find_nearest_nifty_future(token):
+    """
+    Fetches the active nearest NIFTY Future using Upstox's Contract API.
+    """
+    url = "https://api.upstox.com/v2/option/contract"
+    params = {"instrument_key": NIFTY_INDEX_KEY}
 
-    for q in queries_to_try:
-        try:
-            res = upstox_get(
-                search_url,
-                params={
-                    "query": q,
-                    "exchange": "NSE_FO",
-                    "instrument_type": "FUT",
-                },
-            )
-            instruments = res.get("data", [])
-            valid = []
-            today = pd.Timestamp(datetime.now().date())
+    res = upstox_get(url, token, params=params)
+    contracts = res.get("data", [])
 
-            for item in instruments:
-                # Filter for futures contract
-                itype = item.get("instrument_type", "")
-                tsym = item.get("trading_symbol", "")
+    today = pd.Timestamp(datetime.now().date())
+    valid_futures = []
 
-                if "FUT" in itype or "FUT" in tsym:
-                    expiry = item.get("expiry")
-                    if expiry:
-                        exp_dt = pd.Timestamp(expiry)
-                        if exp_dt.date() >= today.date():
-                            valid.append(
-                                {
-                                    "key": item.get("instrument_key"),
-                                    "symbol": tsym,
-                                    "expiry": exp_dt,
-                                }
-                            )
+    for item in contracts:
+        # Check for Futures instrument type
+        if item.get("instrument_type") == "FUT":
+            expiry = item.get("expiry")
+            if expiry:
+                exp_dt = pd.Timestamp(expiry)
+                if exp_dt.date() >= today.date():
+                    valid_futures.append(
+                        {
+                            "key": item.get("instrument_key"),
+                            "symbol": item.get("trading_symbol"),
+                            "expiry": exp_dt,
+                        }
+                    )
 
-            if valid:
-                valid_df = pd.DataFrame(valid).sort_values("expiry")
-                return (
-                    valid_df.iloc[0]["key"],
-                    valid_df.iloc[0]["symbol"],
-                )
-        except Exception:
-            continue
+    if not valid_futures:
+        # Fallback search if contract endpoint returns empty array
+        search_url = "https://api.upstox.com/v2/instruments/search"
+        search_res = upstox_get(
+            search_url,
+            token,
+            params={"query": "NIFTY", "exchange": "NSE_FO"},
+        )
+        for item in search_res.get("data", []):
+            if item.get("instrument_type") == "FUT":
+                expiry = item.get("expiry")
+                if expiry:
+                    exp_dt = pd.Timestamp(expiry)
+                    if exp_dt.date() >= today.date():
+                        valid_futures.append(
+                            {
+                                "key": item.get("instrument_key"),
+                                "symbol": item.get("trading_symbol"),
+                                "expiry": exp_dt,
+                            }
+                        )
 
-    # Fallback to standard monthly key convention if search API returns empty
-    now = datetime.now()
-    curr_month = now.strftime("%b").upper()
-    curr_year = now.strftime("%y")
-    fallback_key = f"NSE_FO|NIFTY{curr_year}{curr_month}FUT"
-    return fallback_key, f"NIFTY {curr_month} FUT"
+    if not valid_futures:
+        raise RuntimeError(
+            "Could not resolve active NIFTY Future instrument key from Upstox API."
+        )
+
+    futures_df = pd.DataFrame(valid_futures).sort_values("expiry")
+    selected = futures_df.iloc[0]
+    return selected["key"], selected["symbol"]
 
 
-def get_nifty_future_intraday(future_key):
+def get_nifty_future_intraday(token, future_key):
     encoded_key = quote(future_key, safe="")
     url = f"https://api.upstox.com/v3/historical-candle/intraday/{encoded_key}/minutes/{INTERVAL}"
 
-    res = upstox_get(url)
+    res = upstox_get(url, token)
     candles = res.get("data", {}).get("candles", [])
 
     if not candles:
@@ -170,7 +178,9 @@ def calculate_position_builder(price_df, future_df):
     )
 
     if df.empty:
-        raise RuntimeError("Timestamp mismatch between Index and Futures data.")
+        raise RuntimeError(
+            "Timestamp mismatch between Index and Futures data."
+        )
 
     df["price_change"] = df["close"].diff(1)
     df["price_change_pct"] = df["close"].pct_change(1) * 100
@@ -310,15 +320,18 @@ def render_chart(df, future_symbol):
 # MAIN ENTRYPOINT
 # ================================================================
 if st.button("Run Position Builder"):
-    if not ACCESS_TOKEN:
-        st.error("Please provide a valid Upstox Access Token.")
+    if not access_token_input:
+        st.error("Please enter your Upstox Access Token.")
         st.stop()
 
     try:
+        token = access_token_input.strip()
         with st.spinner("Fetching NIFTY Index and Futures data..."):
-            idx_df = filter_market_hours(get_nifty_index_intraday())
-            fut_key, fut_symbol = find_nearest_nifty_future()
-            fut_df = filter_market_hours(get_nifty_future_intraday(fut_key))
+            idx_df = filter_market_hours(get_nifty_index_intraday(token))
+            fut_key, fut_symbol = find_nearest_nifty_future(token)
+            fut_df = filter_market_hours(
+                get_nifty_future_intraday(token, fut_key)
+            )
 
             builder_df = calculate_position_builder(idx_df, fut_df)
 
