@@ -22,7 +22,7 @@ NIFTY_INDEX_KEY = "NSE_INDEX|Nifty 50"
 INTERVAL = 3
 MARKET_START = "09:15"
 MARKET_END = "15:30"
-HISTOGRAM_SCALE = 1000
+HISTOGRAM_SCALE = 100
 IST = ZoneInfo("Asia/Kolkata")
 
 # ================================================================
@@ -78,7 +78,6 @@ def get_nifty_index_intraday(token):
 
 @st.cache_data(ttl=3600)
 def fetch_upstox_nifty_instruments():
-    """Downloads Upstox official master file to get current Futures & Options instruments."""
     url = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.csv.gz"
 
     try:
@@ -91,7 +90,6 @@ def fetch_upstox_nifty_instruments():
 
         df.columns = [c.lower() for c in df.columns]
 
-        # Identify flexible column names
         type_col = (
             "instrument_type" if "instrument_type" in df.columns else "segment"
         )
@@ -111,7 +109,6 @@ def fetch_upstox_nifty_instruments():
             else ("asset_symbol" if "asset_symbol" in df.columns else sym_col)
         )
 
-        # Match NIFTY across name, symbol, or trading symbol
         mask = (
             df[name_col].astype(str).str.upper().isin(["NIFTY", "NIFTY 50"])
             | df[sym_col].astype(str).str.upper().str.startswith("NIFTY")
@@ -121,31 +118,25 @@ def fetch_upstox_nifty_instruments():
         if nifty_df.empty:
             raise Exception("No NIFTY records found in Upstox Master CSV.")
 
-        # Ensure valid expiry parsing
         nifty_df["expiry_dt"] = pd.to_datetime(
             nifty_df["expiry"], errors="coerce"
         )
         nifty_df = nifty_df.dropna(subset=["expiry_dt"])
-
         today = pd.Timestamp(datetime.now().date())
 
-        # Filter upcoming/active expiries
         active_df = nifty_df[
             nifty_df["expiry_dt"].dt.date >= today.date()
         ].sort_values("expiry_dt")
 
         if active_df.empty:
-            # Fallback to nearest future dates if client/server clock offset exists
             active_df = nifty_df.sort_values("expiry_dt", ascending=True)
 
-        # 1. Futures Contract
         futs = active_df[
             active_df[type_col].astype(str).str.upper().str.contains("FUT")
         ]
         fut_key = futs.iloc[0][key_col] if not futs.empty else None
         fut_sym = futs.iloc[0][sym_col] if not futs.empty else "NIFTY FUT"
 
-        # 2. Options Contracts (CE / PE or OPTIDX)
         opts = active_df[
             active_df[type_col]
             .astype(str)
@@ -154,8 +145,7 @@ def fetch_upstox_nifty_instruments():
         ]
 
         if opts.empty:
-            # Ultimate Fallback: return empty options df without crashing
-            return fut_key, fut_sym, pd.DataFrame(), key_col, sym_col
+            return fut_key, fut_sym, pd.DataFrame(), key_col, sym_col, type_col
 
         nearest_expiry = opts.iloc[0]["expiry_dt"]
         matching_opts = opts[opts["expiry_dt"] == nearest_expiry].copy()
@@ -166,6 +156,7 @@ def fetch_upstox_nifty_instruments():
             matching_opts,
             key_col,
             sym_col,
+            type_col,
         )
 
     except Exception as e:
@@ -211,58 +202,47 @@ def filter_market_hours(df):
 
 
 # ================================================================
-# POSITION BUILDER CALCULATION
+# POSITION BUILDER CALCULATION (NET PE vs CE DIRECTIONAL OI)
 # ================================================================
-def calculate_position_builder(price_df, derivative_df):
-    price = price_df.copy()
-    deriv = derivative_df[["timestamp", "close", "oi"]].copy()
-    deriv.rename(
-        columns={"close": "deriv_close", "oi": "deriv_oi"}, inplace=True
-    )
-
-    df = pd.merge(price, deriv, on="timestamp", how="inner").sort_values(
+def calculate_position_builder(price_df, deriv_df, is_options=True):
+    df = pd.merge(price_df, deriv_df, on="timestamp", how="inner").sort_values(
         "timestamp"
     )
 
     if df.empty:
-        raise RuntimeError("Timestamp mismatch between Index and Options data.")
+        raise RuntimeError("Timestamp alignment error between index and OI data.")
 
     df["price_change"] = df["close"].diff(1)
-    df["price_change_pct"] = df["close"].pct_change(1) * 100
-    df["oi_change"] = df["deriv_oi"].diff(1)
-    df["oi_change_pct"] = df["deriv_oi"].pct_change(1) * 100
 
-    def classify(row):
-        p_chg = row["price_change"]
-        oi_chg = row["oi_change"]
+    if is_options:
+        # Calculate Delta of PE OI and Delta of CE OI
+        df["ce_oi_change"] = df["ce_oi"].diff(1)
+        df["pe_oi_change"] = df["pe_oi"].diff(1)
 
-        if pd.isna(p_chg) or pd.isna(oi_chg) or oi_chg == 0:
-            return "NEUTRAL"
-        if p_chg > 0 and oi_chg > 0:
-            return "LONG BUILDUP"
-        if p_chg < 0 and oi_chg > 0:
-            return "SHORT BUILDUP"
-        if p_chg > 0 and oi_chg < 0:
-            return "SHORT COVERING"
-        if p_chg < 0 and oi_chg < 0:
-            return "LONG UNWINDING"
-        return "NEUTRAL"
+        # Net OI Change = Delta PE OI - Delta CE OI
+        # Positive Net OI = Bullish Bias (Put writing / Call unwinding)
+        # Negative Net OI = Bearish Bias (Call writing / Put unwinding)
+        df["net_oi_change"] = df["pe_oi_change"] - df["ce_oi_change"]
+        df["position_builder_scaled"] = (
+            df["net_oi_change"] / 50
+        )  # Normalize by contract lot size
+    else:
+        # Futures Calculation Standard
+        df["oi_change"] = df["deriv_oi"].diff(1)
+        df["oi_change_pct"] = df["deriv_oi"].pct_change(1) * 100
 
-    df["position_type"] = df.apply(classify, axis=1)
-    df["position_builder"] = df["oi_change_pct"]
+        def classify(row):
+            p_chg = row["price_change"]
+            oi_chg = row["oi_change"]
+            if pd.isna(p_chg) or pd.isna(oi_chg) or oi_chg == 0:
+                return 0
+            if (p_chg > 0 and oi_chg > 0) or (p_chg > 0 and oi_chg < 0):
+                return abs(row["oi_change_pct"])
+            else:
+                return -abs(row["oi_change_pct"])
 
-    bullish = ["LONG BUILDUP", "SHORT COVERING"]
-    bearish = ["SHORT BUILDUP", "LONG UNWINDING"]
+        df["position_builder_scaled"] = df.apply(classify, axis=1) * HISTOGRAM_SCALE
 
-    df.loc[df["position_type"].isin(bullish), "position_builder"] = df[
-        "position_builder"
-    ].abs()
-    df.loc[df["position_type"].isin(bearish), "position_builder"] = -df[
-        "position_builder"
-    ].abs()
-    df.loc[df["position_type"] == "NEUTRAL", "position_builder"] = 0
-
-    df["position_builder_scaled"] = df["position_builder"] * HISTOGRAM_SCALE
     return df
 
 
@@ -304,7 +284,7 @@ def render_chart(df, source_label):
         )
 
     p_width = (3 / (24 * 60)) * 0.78
-    values = df["position_builder_scaled"]
+    values = df["position_builder_scaled"].fillna(0)
     colors = np.where(values >= 0, "#19b5a5", "#ff4d5a")
     ax_position.bar(
         df["timestamp"],
@@ -371,13 +351,12 @@ try:
 
     with st.spinner("Fetching NIFTY Index and OI data..."):
         idx_df = filter_market_hours(get_nifty_index_intraday(ACCESS_TOKEN))
-        fut_key, fut_sym, opts_df, key_col, sym_col = (
+        fut_key, fut_sym, opts_df, key_col, sym_col, type_col = (
             fetch_upstox_nifty_instruments()
         )
 
         if "Weekly" in data_source_mode and not opts_df.empty:
             last_close = idx_df["close"].iloc[-1]
-
             strike_col = (
                 "strike_price" if "strike_price" in opts_df.columns else "strike"
             )
@@ -385,60 +364,79 @@ try:
                 opts_df[strike_col], errors="coerce"
             )
 
-            # Filter ATM range +- 400 pts
+            # Filter ATM range (+- 300 pts around current index value)
             atm_opts = opts_df[
-                (opts_df["strike_num"] >= last_close - 400)
-                & (opts_df["strike_num"] <= last_close + 400)
-            ]
+                (opts_df["strike_num"] >= last_close - 300)
+                & (opts_df["strike_num"] <= last_close + 300)
+            ].copy()
 
             if atm_opts.empty:
                 atm_opts = opts_df
 
-            combined_oi_df = None
-            for _, row in atm_opts.head(10).iterrows():
+            # Separate into CE and PE dataframes
+            ce_opts = atm_opts[
+                atm_opts[type_col].astype(str).str.upper().str.contains("CE")
+            ]
+            pe_opts = atm_opts[
+                atm_opts[type_col].astype(str).str.upper().str.contains("PE")
+            ]
+
+            ce_df = None
+            for _, row in ce_opts.head(6).iterrows():
                 opt_data = filter_market_hours(
                     get_derivative_intraday(ACCESS_TOKEN, row[key_col])
                 )
                 if not opt_data.empty:
-                    if combined_oi_df is None:
-                        combined_oi_df = opt_data[
-                            ["timestamp", "close", "oi"]
-                        ].copy()
+                    if ce_df is None:
+                        ce_df = opt_data[["timestamp", "oi"]].copy()
+                        ce_df.rename(columns={"oi": "ce_oi"}, inplace=True)
                     else:
-                        combined_oi_df["oi"] += opt_data["oi"]
+                        ce_df["ce_oi"] += opt_data["oi"]
 
-            if combined_oi_df is None or combined_oi_df.empty:
-                # Fallback to Futures if options intraday fail
-                target_deriv_df = filter_market_hours(
-                    get_derivative_intraday(ACCESS_TOKEN, fut_key)
+            pe_df = None
+            for _, row in pe_opts.head(6).iterrows():
+                opt_data = filter_market_hours(
+                    get_derivative_intraday(ACCESS_TOKEN, row[key_col])
                 )
-                source_tag = f"{fut_sym} (Fallback)"
-            else:
-                target_deriv_df = combined_oi_df
+                if not opt_data.empty:
+                    if pe_df is None:
+                        pe_df = opt_data[["timestamp", "oi"]].copy()
+                        pe_df.rename(columns={"oi": "pe_oi"}, inplace=True)
+                    else:
+                        pe_df["pe_oi"] += opt_data["oi"]
+
+            if ce_df is not None and pe_df is not None:
+                opts_combined = pd.merge(
+                    ce_df, pe_df, on="timestamp", how="inner"
+                )
+                builder_df = calculate_position_builder(
+                    idx_df, opts_combined, is_options=True
+                )
                 exp_date_str = opts_df.iloc[0]["expiry_dt"].strftime("%b-%d")
                 source_tag = f"NIFTY Weekly Expiry Options ({exp_date_str})"
+            else:
+                fut_df = filter_market_hours(
+                    get_derivative_intraday(ACCESS_TOKEN, fut_key)
+                )
+                builder_df = calculate_position_builder(
+                    idx_df, fut_df, is_options=False
+                )
+                source_tag = f"{fut_sym} (Fallback)"
         else:
-            target_deriv_df = filter_market_hours(
+            fut_df = filter_market_hours(
                 get_derivative_intraday(ACCESS_TOKEN, fut_key)
             )
+            builder_df = calculate_position_builder(
+                idx_df, fut_df, is_options=False
+            )
             source_tag = f"{fut_sym}"
-
-        builder_df = calculate_position_builder(idx_df, target_deriv_df)
 
     st.success(f"Connected to {source_tag} | Timezone: IST (UTC+5:30)")
     render_chart(builder_df, source_tag)
 
     st.subheader("Recent Position Builder Data (IST)")
     st.dataframe(
-        builder_df[
-            [
-                "timestamp",
-                "close",
-                "deriv_oi",
-                "position_type",
-                "position_builder_scaled",
-            ]
-        ].tail(15),
+        builder_df.tail(15),
         use_container_width=True,
     )
 
