@@ -9,13 +9,9 @@ import requests
 import streamlit as st
 
 # ==========================================
-# PAGE CONFIG & LAYOUT
+# PAGE CONFIG & MINIMAL STYLING
 # ==========================================
-st.set_page_config(
-    layout="wide",
-    page_title="Nifty 50 Chart",
-    page_icon="📈",
-)
+st.set_page_config(layout="wide", page_title="Nifty 50 Chart", page_icon="📈")
 
 st.markdown(
     """
@@ -87,7 +83,7 @@ HTTP_SESSION.headers.update(
 )
 
 # ==========================================
-# DATA FETCHING ENGINE
+# FETCH ENGINE
 # ==========================================
 def fetch_raw_1min_candles(instrument_key):
     encoded_key = urllib.parse.quote(instrument_key)
@@ -158,8 +154,10 @@ def fetch_strike_oi_parallel(keys, timeframe):
         df_1m = fetch_raw_1min_candles(key)
         if not df_1m.empty:
             df_res = resample_candles(df_1m, timeframe)
-            df_res["oi_diff"] = df_res["oi"].diff().fillna(df_res["oi"])
-            return df_res[["timestamp", "oi_diff"]]
+            # Cumulative intraday OI change relative to Market Open (09:15 AM)
+            base_oi = df_res["oi"].iloc[0]
+            df_res["cum_oi_change"] = df_res["oi"] - base_oi
+            return df_res[["timestamp", "cum_oi_change"]]
         return pd.DataFrame()
 
     results = []
@@ -171,7 +169,7 @@ def fetch_strike_oi_parallel(keys, timeframe):
                 results.append(res)
 
     if results:
-        return pd.concat(results).groupby("timestamp", as_index=False)["oi_diff"].sum()
+        return pd.concat(results).groupby("timestamp", as_index=False)["cum_oi_change"].sum()
     return pd.DataFrame()
 
 def build_dataset(timeframe, num_strikes, selected_expiry):
@@ -195,12 +193,15 @@ def build_dataset(timeframe, num_strikes, selected_expiry):
         df_puts = fetch_strike_oi_parallel(put_keys, timeframe)
 
         if not df_calls.empty and not df_puts.empty:
-            merged = pd.merge(df_spot, df_calls.rename(columns={"oi_diff": "call_oi_diff"}), on="timestamp", how="left")
-            merged = pd.merge(merged, df_puts.rename(columns={"oi_diff": "put_oi_diff"}), on="timestamp", how="left")
-            merged["call_oi_diff"] = merged["call_oi_diff"].fillna(0)
-            merged["put_oi_diff"] = merged["put_oi_diff"].fillna(0)
+            merged = pd.merge(df_spot, df_calls.rename(columns={"cum_oi_change": "call_cum_oi"}), on="timestamp", how="left")
+            merged = pd.merge(merged, df_puts.rename(columns={"cum_oi_change": "put_cum_oi"}), on="timestamp", how="left")
+            merged["call_cum_oi"] = merged["call_cum_oi"].fillna(0)
+            merged["put_cum_oi"] = merged["put_cum_oi"].fillna(0)
             
-            raw_pb = merged["put_oi_diff"] - merged["call_oi_diff"]
+            # Position Builder = Put OI Change - Call OI Change
+            raw_pb = merged["put_cum_oi"] - merged["call_cum_oi"]
+            
+            # Scale to [-200, 200]
             max_val = raw_pb.abs().max()
             merged["pos_builder"] = (raw_pb / max_val * 180.0) if max_val > 0 else raw_pb
         else:
@@ -214,7 +215,7 @@ def build_dataset(timeframe, num_strikes, selected_expiry):
     return merged
 
 # ==========================================
-# TOP CONTROL BAR
+# HEADER CONTROLS
 # ==========================================
 top_bar = st.container()
 with top_bar:
@@ -229,19 +230,18 @@ with top_bar:
         expiry_input = st.selectbox("Expiry", options=get_expiry_dates(SPOT_KEY), index=0, key="ex_s", label_visibility="collapsed")
 
 # ==========================================
-# CHART DISPLAY & UNIFIED CROSSHAIR
+# DASHBOARD METRICS & PLOT
 # ==========================================
 df = build_dataset(tf_option, strike_count, expiry_input)
 
 if not df.empty:
     last_row = df.iloc[-1]
     
-    # Accurate Intraday Cumulative OI Bias
-    cumulative_net_delta = df["pos_builder"].sum()
-    bias_label = "BULLISH" if cumulative_net_delta >= 0 else "BEARISH"
-    bias_color = "#089981" if cumulative_net_delta >= 0 else "#f23645"
+    # Net Delta & Bias matching rules
+    current_net_delta = int(last_row['pos_builder'])
+    bias_label = "BULLISH" if current_net_delta >= 0 else "BEARISH"
+    bias_color = "#089981" if current_net_delta >= 0 else "#f23645"
 
-    # Only Spot Price, Net Delta, and OI Bias metrics are shown
     m1, m2, m3 = st.columns(3)
     with m1:
         st.markdown(
@@ -250,7 +250,7 @@ if not df.empty:
         )
     with m2:
         st.markdown(
-            f"""<div class='metric-card'><div class='metric-label'>Net Position Delta</div><div class='metric-val' style='color:{last_row["color"]};'>{last_row['pos_builder']:,.0f}</div></div>""",
+            f"""<div class='metric-card'><div class='metric-label'>Net Position Delta</div><div class='metric-val' style='color:{last_row["color"]};'>{current_net_delta:+}</div></div>""",
             unsafe_allow_html=True,
         )
     with m3:
@@ -259,7 +259,7 @@ if not df.empty:
             unsafe_allow_html=True,
         )
 
-    # Subplots linked together on x-axis
+    # Subplot Chart Initialization
     fig = make_subplots(
         rows=2,
         cols=1,
@@ -268,7 +268,6 @@ if not df.empty:
         row_heights=[0.72, 0.28],
     )
 
-    # Main Price Chart
     fig.add_trace(
         go.Candlestick(
             x=df["timestamp"],
@@ -286,7 +285,6 @@ if not df.empty:
         col=1,
     )
 
-    # Position Builder Subplot
     fig.add_trace(
         go.Bar(
             x=df["timestamp"],
@@ -299,7 +297,6 @@ if not df.empty:
         col=1,
     )
 
-    # SINGLE UNIFIED CROSSHAIR CONFIGURATION
     fig.update_layout(
         template="plotly_dark",
         paper_bgcolor="#0d1117",
@@ -312,7 +309,7 @@ if not df.empty:
         showlegend=False,
     )
 
-    # Forces horizontal crosshair line to project straight across both subplots
+    # Shared continuous crosshair configuration
     fig.update_xaxes(
         showgrid=True,
         gridcolor="#21262d",
