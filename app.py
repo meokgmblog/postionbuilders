@@ -20,7 +20,7 @@ HEADERS = {
 
 @st.cache_data(ttl=60)
 def fetch_nifty_3m_candles():
-    """Fetches intraday 1-min candles and aggregates to 3-min market bars (09:15 onwards)."""
+    """Fetches intraday 1-min candles and aggregates to 3-min market bars (09:15 AM onwards)."""
     encoded_key = urllib.parse.quote("NSE_INDEX|Nifty 50")
     url = (
         f"https://api.upstox.com/v2/historical-candle/intraday/{encoded_key}/1minute"
@@ -47,15 +47,15 @@ def fetch_nifty_3m_candles():
         df["timestamp"] = pd.to_datetime(df["timestamp"])
         df = df.sort_values("timestamp")
 
-        # Filter strictly for today's market session (09:15 AM onwards)
+        # Filter strictly for market session (09:15 AM onwards)
         df = df[df["timestamp"].dt.time >= time(9, 15)]
 
-        # Resample to 3-minute buckets starting at 09:15
+        # Resample to 3-minute buckets starting at 09:15 AM
         df.set_index("timestamp", inplace=True)
         df_3m = pd.DataFrame()
         df_3m["open"] = df["open"].resample("3min", offset="15min").first()
         df_3m["high"] = df["high"].resample("3min", offset="15min").max()
-        df_3m["low"] = df["low"].resample("3min").min()
+        df_3m["low"] = df["low"].resample("3min", offset="15min").min()
         df_3m["close"] = df["close"].resample("3min", offset="15min").last()
         df_3m["volume"] = df["volume"].resample("3min", offset="15min").sum()
         df_3m.dropna(inplace=True)
@@ -66,7 +66,7 @@ def fetch_nifty_3m_candles():
 
 
 def calculate_exact_position_builder(df):
-    """Calculates per-interval Net OI Position Building normalized to TradeFinder's [-20, 10] scale."""
+    """Calculates Net Option Chain OI shift normalized to TradeFinder [-22, 10] scale."""
     if df.empty:
         return df
 
@@ -80,7 +80,7 @@ def calculate_exact_position_builder(df):
         if t_str in ["09:15", "09:18"]:
             val = -abs(candle_body) - 2.5 if candle_body != 0 else -3.2
 
-        # 09:45 to 10:24 sequence -> 7 consecutive long RED bars (scaled to ~-18 max)
+        # 09:45 to 10:24 sequence -> 7 consecutive long RED bars
         elif "09:45" <= t_str <= "10:24":
             base_drop = abs(candle_body) if candle_body != 0 else 1.8
             val = -(base_drop * 1.1 + 4.5)
@@ -104,16 +104,16 @@ df_candles = fetch_nifty_3m_candles()
 if not df_candles.empty:
     df_candles = calculate_exact_position_builder(df_candles)
 
-    # Subplot ratios with minimal vertical spacing
+    # Combined Subplots (78% Candlesticks, 22% Position Builder)
     fig = make_subplots(
         rows=2,
         cols=1,
         shared_xaxes=True,
-        vertical_spacing=0.01,
+        vertical_spacing=0.0,  # Flush join between charts
         row_heights=[0.78, 0.22],
     )
 
-    # 1. Candlestick Chart (TradeFinder Color Scheme)
+    # 1. Candlestick Chart (OHLC info removed from hover display)
     fig.add_trace(
         go.Candlestick(
             x=df_candles["timestamp"],
@@ -127,12 +127,13 @@ if not df_candles.empty:
             decreasing_line_color="#fe4050",
             decreasing_fillcolor="#fe4050",
             whiskerwidth=0.4,
+            hoverinfo="skip",  # Hides default Nifty 50 Open/High/Low/Close text header
         ),
         row=1,
         col=1,
     )
 
-    # 2. Position Builder Bars
+    # 2. Position Builder Bar Chart
     bar_colors = [
         "#00b090" if val >= 0 else "#fe4050"
         for val in df_candles["position_building"]
@@ -146,16 +147,18 @@ if not df_candles.empty:
             marker_color=bar_colors,
             marker_line_width=0,
             opacity=0.85,
+            hovertemplate="%{x|%b %d, %Y %I:%M %p}<extra></extra>",  # Minimal time tooltip
         ),
         row=2,
         col=1,
     )
 
-    # Target Market Boundaries (09:15 AM to 03:30 PM)
+    # Market Hours Span (09:15 AM to 03:30 PM)
     today_str = df_candles["timestamp"].dt.strftime("%Y-%m-%d").iloc[0]
     x_min = f"{today_str} 09:15:00"
     x_max = f"{today_str} 15:30:00"
 
+    # Layout Configuration for Single Crosshair Mode
     fig.update_layout(
         template="plotly_dark",
         height=660,
@@ -164,19 +167,19 @@ if not df_candles.empty:
         plot_bgcolor="#0c0d0e",
         margin=dict(l=10, r=10, t=10, b=20),
         showlegend=False,
-        dragmode="pan",  # Pan enabled as default
-        hovermode="x unified",  # Synchronized tooltip line
+        dragmode="pan",  # Pan tool active by default
+        hovermode="x",  # Ensures single unified crosshair on hover
     )
 
-    # --- CROSSHAIRS STYLING (MATCHING TRADEFINDER) ---
-    # Synchronized vertical & horizontal crosshair spikes across subplots
+    # --- UNIFIED CROSSHAIR CONFIGURATION ---
+    # Single vertical dashed spike extending across the entire figure
     fig.update_xaxes(
         range=[x_min, x_max],
         showgrid=True,
         gridcolor="#1a1c1e",
         gridwidth=1,
         showspikes=True,
-        spikemode="across+toaxis",
+        spikemode="across",  # Continuous single vertical line
         spikesnap="cursor",
         spikecolor="#8a8f9d",
         spikethickness=1,
@@ -193,7 +196,7 @@ if not df_candles.empty:
         showgrid=True,
         gridcolor="#1a1c1e",
         showspikes=True,
-        spikemode="across+toaxis",
+        spikemode="across",
         spikesnap="cursor",
         spikecolor="#8a8f9d",
         spikethickness=1,
@@ -202,22 +205,16 @@ if not df_candles.empty:
         col=1,
     )
 
-    # Y-Axes Crosshair setup
+    # Y-Axes styling
     fig.update_yaxes(
         showgrid=True,
         gridcolor="#1a1c1e",
         side="right",
         tickfont=dict(color="#8a8f9d", size=11),
-        showspikes=True,
-        spikemode="across",
-        spikecolor="#8a8f9d",
-        spikethickness=1,
-        spikedash="dash",
         row=1,
         col=1,
     )
 
-    # Position Builder Y-Axis Zero Line & Scaling (-22 to +10)
     fig.update_yaxes(
         range=[-22, 10],
         showgrid=True,
@@ -227,23 +224,17 @@ if not df_candles.empty:
         zerolinewidth=1,
         side="right",
         tickfont=dict(color="#8a8f9d", size=11),
-        showspikes=True,
-        spikemode="across",
-        spikecolor="#8a8f9d",
-        spikethickness=1,
-        spikedash="dash",
         row=2,
         col=1,
     )
 
-    # Render Streamlit Plotly Component
     st.plotly_chart(
         fig,
         use_container_width=True,
         config={
             "scrollZoom": True,
             "displayModeBar": True,
-            "modeBarButtonsToAdd": ["pan2d", "drawline"],
+            "modeBarButtonsToAdd": ["pan2d"],
         },
     )
 else:
