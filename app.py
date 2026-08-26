@@ -1,44 +1,29 @@
-import requests
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
-
-from datetime import datetime, date
+from datetime import datetime
 from urllib.parse import quote
-
+import matplotlib.dates as mdates
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import requests
+import streamlit as st
 
 # ================================================================
-# CONFIGURATION
+# STREAMLIT CONFIG & SETTINGS
 # ================================================================
+st.set_page_config(page_title="NIFTY 50 Position Builder", layout="wide")
+st.title("📈 NIFTY 50 - 3 Minute Position Builder")
 
-ACCESS_TOKEN = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2M0FZSEUiLCJqdGkiOiI2YThkNTc1Y2Y4MTJmNjA0MzcxZDNlM2MiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc4NzY0NzgzNiwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzg3Njk1MjAwfQ.Z4zP9w3MecFeZEcX5sUt4YdhxS6skp25fbKOv8-_gPU"
+ACCESS_TOKEN = st.text_input(
+    "Upstox Access Token",
+    value="eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI6M0FZSEUiLCJqdGkiOiI2YThkNTc1Y2Y4MTJmNjA0MzcxZDNlM2MiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc4NzY0NzgzNiwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzg3Njk1MjAwfQ.Z4zP9w3MecFeZEcX5sUt4YdhxS6skp25fbKOv8-_gPU",
+    type="password",
+)
 
-# NIFTY 50 index
 NIFTY_INDEX_KEY = "NSE_INDEX|Nifty 50"
-
-# Chart timeframe
 INTERVAL = 3
-
-# Session
 MARKET_START = "09:15"
-MARKET_END   = "15:30"
-
-# Position Builder settings
-OI_LOOKBACK = 1
-NORMALIZE_OI = True
-USE_OI_PERCENT = True
+MARKET_END = "15:30"
 HISTOGRAM_SCALE = 1000
-MIN_OI_CHANGE = 0
-
-# Display
-FIG_WIDTH = 16
-FIG_HEIGHT = 8
-SHOW_GRID = False
-
-# ================================================================
-# UPSTOX HEADERS
-# ================================================================
 
 HEADERS = {
     "Accept": "application/json",
@@ -47,220 +32,157 @@ HEADERS = {
 
 
 # ================================================================
-# 1. GENERIC UPSTOX GET
+# API HELPERS
 # ================================================================
-
 def upstox_get(url, params=None):
     try:
         response = requests.get(
-            url,
-            headers=HEADERS,
-            params=params,
-            timeout=20
+            url, headers=HEADERS, params=params, timeout=20
         )
     except requests.exceptions.RequestException as e:
-        raise RuntimeError(f"NETWORK ERROR: {str(e)}")
-
-    print("\n================ UPSTOX DEBUG ================")
-    print("HTTP STATUS:", response.status_code)
-    print("URL:", url)
-    print("PARAMS:", params)
-    print("RESPONSE:", response.text[:500])
-    print("===============================================\n")
+        raise RuntimeError(f"Network Connection Error: {str(e)}")
 
     if response.status_code != 200:
         raise RuntimeError(
-            f"UPSTOX HTTP {response.status_code}: {response.text[:1000]}"
+            f"Upstox HTTP {response.status_code}: {response.text[:300]}"
         )
 
-    try:
-        data = response.json()
-    except Exception:
-        raise RuntimeError("Upstox returned non-JSON response.")
-
+    data = response.json()
     if data.get("status") != "success":
-        raise RuntimeError(f"UPSTOX API ERROR: {data}")
+        raise RuntimeError(f"Upstox API Error: {data}")
 
     return data
 
-
-# ================================================================
-# 2. GET NIFTY INDEX 3-MINUTE DATA
-# ================================================================
 
 def get_nifty_index_intraday():
     encoded_key = quote(NIFTY_INDEX_KEY, safe="")
     url = f"https://api.upstox.com/v3/historical-candle/intraday/{encoded_key}/minutes/{INTERVAL}"
 
-    print("\nFetching NIFTY 50 index data...")
-    response = upstox_get(url)
-    candles = response["data"]["candles"]
+    res = upstox_get(url)
+    candles = res.get("data", {}).get("candles", [])
 
     if not candles:
-        raise RuntimeError("No NIFTY index candles returned.")
+        raise RuntimeError("No intraday candles returned for NIFTY 50 Index.")
 
     df = pd.DataFrame(
         candles,
-        columns=["timestamp", "open", "high", "low", "close", "volume", "oi"]
+        columns=["timestamp", "open", "high", "low", "close", "volume", "oi"],
     )
     df["timestamp"] = pd.to_datetime(df["timestamp"])
     return df.sort_values("timestamp").reset_index(drop=True)
 
 
-# ================================================================
-# 3. SEARCH NIFTY FUTURES
-# ================================================================
-
 def find_nearest_nifty_future():
-    # Corrected Upstox v2 Search API endpoint parameter key (`search_text`)
-    url = "https://api.upstox.com/v2/option/contract"
-    params = {
-        "instrument_key": NIFTY_INDEX_KEY
-    }
+    # Primary attempt: Instrument Search
+    search_url = "https://api.upstox.com/v2/instruments/search"
+    queries_to_try = ["NIFTY", "NSE_FO|NIFTY"]
 
-    print("\nSearching active NIFTY Futures via Option Contract API...")
-    
-    try:
-        # Fallback to general search if contract chain fails
-        url_search = "https://api.upstox.com/v2/instruments/search"
-        search_params = {
-            "search_text": "NIFTY FUT",
-            "exchange": "NSE_FO"
-        }
-        
-        res = requests.get(
-            url_search,
-            headers=HEADERS,
-            params=search_params,
-            timeout=20
-        )
-        
-        result = res.json()
-        instruments = result.get("data", [])
-        
-    except Exception as e:
-        raise RuntimeError(f"UPSTOX CONNECTION ERROR: {e}")
-
-    valid = []
-    today = pd.Timestamp(datetime.now().date())
-
-    for item in instruments:
-        # Filter strictly for Futures
-        if item.get("instrument_type") != "FUT":
-            continue
-
-        expiry = item.get("expiry")
-        if not expiry:
-            continue
-
+    for q in queries_to_try:
         try:
-            expiry_date = pd.Timestamp(expiry)
+            res = upstox_get(
+                search_url,
+                params={
+                    "query": q,
+                    "exchange": "NSE_FO",
+                    "instrument_type": "FUT",
+                },
+            )
+            instruments = res.get("data", [])
+            valid = []
+            today = pd.Timestamp(datetime.now().date())
+
+            for item in instruments:
+                # Filter for futures contract
+                itype = item.get("instrument_type", "")
+                tsym = item.get("trading_symbol", "")
+
+                if "FUT" in itype or "FUT" in tsym:
+                    expiry = item.get("expiry")
+                    if expiry:
+                        exp_dt = pd.Timestamp(expiry)
+                        if exp_dt.date() >= today.date():
+                            valid.append(
+                                {
+                                    "key": item.get("instrument_key"),
+                                    "symbol": tsym,
+                                    "expiry": exp_dt,
+                                }
+                            )
+
+            if valid:
+                valid_df = pd.DataFrame(valid).sort_values("expiry")
+                return (
+                    valid_df.iloc[0]["key"],
+                    valid_df.iloc[0]["symbol"],
+                )
         except Exception:
             continue
 
-        if expiry_date.date() < today.date():
-            continue
-
-        instrument_key = item.get("instrument_key")
-        if not instrument_key:
-            continue
-
-        valid.append({
-            "instrument_key": instrument_key,
-            "trading_symbol": item.get("trading_symbol"),
-            "expiry": expiry_date,
-            "segment": item.get("segment"),
-            "instrument_type": item.get("instrument_type"),
-            "underlying_symbol": item.get("underlying_symbol"),
-            "lot_size": item.get("lot_size"),
-        })
-
-    if not valid:
-        raise RuntimeError(
-            "Upstox returned search results, but none had a valid future expiry."
-        )
-
-    futures = pd.DataFrame(valid).sort_values("expiry").reset_index(drop=True)
-    selected = futures.iloc[0]
-
-    print("\nSELECTED FUTURE:")
-    print("Trading Symbol :", selected["trading_symbol"])
-    print("Expiry         :", selected["expiry"].strftime("%Y-%m-%d"))
-    print("Instrument Key :", selected["instrument_key"])
-
-    return selected["instrument_key"]
+    # Fallback to standard monthly key convention if search API returns empty
+    now = datetime.now()
+    curr_month = now.strftime("%b").upper()
+    curr_year = now.strftime("%y")
+    fallback_key = f"NSE_FO|NIFTY{curr_year}{curr_month}FUT"
+    return fallback_key, f"NIFTY {curr_month} FUT"
 
 
-# ================================================================
-# 4. GET NIFTY FUTURES 3-MINUTE DATA
-# ================================================================
-
-def get_nifty_future_intraday(instrument_key):
-    encoded_key = quote(instrument_key, safe="")
+def get_nifty_future_intraday(future_key):
+    encoded_key = quote(future_key, safe="")
     url = f"https://api.upstox.com/v3/historical-candle/intraday/{encoded_key}/minutes/{INTERVAL}"
 
-    print("\nFetching NIFTY FUTURES data...")
-    response = upstox_get(url)
-    candles = response["data"]["candles"]
+    res = upstox_get(url)
+    candles = res.get("data", {}).get("candles", [])
 
     if not candles:
-        raise RuntimeError("No NIFTY futures candles returned.")
+        raise RuntimeError(
+            f"No futures candle data returned for key: {future_key}"
+        )
 
     df = pd.DataFrame(
         candles,
-        columns=["timestamp", "open", "high", "low", "close", "volume", "oi"]
+        columns=["timestamp", "open", "high", "low", "close", "volume", "oi"],
     )
     df["timestamp"] = pd.to_datetime(df["timestamp"])
     return df.sort_values("timestamp").reset_index(drop=True)
 
-
-# ================================================================
-# 5. FILTER MARKET HOURS
-# ================================================================
 
 def filter_market_hours(df):
     df = df.copy()
     df["time"] = df["timestamp"].dt.time
-
     start = datetime.strptime(MARKET_START, "%H:%M").time()
     end = datetime.strptime(MARKET_END, "%H:%M").time()
-
     df = df[(df["time"] >= start) & (df["time"] <= end)].copy()
-    df.drop(columns=["time"], inplace=True)
-    return df.reset_index(drop=True)
+    return df.drop(columns=["time"]).reset_index(drop=True)
 
 
 # ================================================================
-# 6. CALCULATE POSITION BUILDER
+# POSITION BUILDER CALCULATION
 # ================================================================
-
 def calculate_position_builder(price_df, future_df):
     price = price_df.copy()
     future = future_df[["timestamp", "close", "oi"]].copy()
-
     future.rename(
-        columns={"close": "future_close", "oi": "future_oi"},
-        inplace=True
+        columns={"close": "future_close", "oi": "future_oi"}, inplace=True
     )
 
-    df = pd.merge(price, future, on="timestamp", how="inner").sort_values("timestamp").reset_index(drop=True)
+    df = pd.merge(price, future, on="timestamp", how="inner").sort_values(
+        "timestamp"
+    )
 
     if df.empty:
-        raise RuntimeError("No matching timestamps between Index and Futures.")
+        raise RuntimeError("Timestamp mismatch between Index and Futures data.")
 
-    df["price_change"] = df["close"].diff(OI_LOOKBACK)
-    df["price_change_pct"] = df["close"].pct_change(OI_LOOKBACK) * 100
-
-    df["oi_change"] = df["future_oi"].diff(OI_LOOKBACK)
-    df["oi_change_pct"] = df["future_oi"].pct_change(OI_LOOKBACK) * 100
+    df["price_change"] = df["close"].diff(1)
+    df["price_change_pct"] = df["close"].pct_change(1) * 100
+    df["oi_change"] = df["future_oi"].diff(1)
+    df["oi_change_pct"] = df["future_oi"].pct_change(1) * 100
 
     def classify(row):
         p_chg = row["price_change"]
         oi_chg = row["oi_change"]
 
-        if pd.isna(p_chg) or pd.isna(oi_chg) or abs(oi_chg) <= MIN_OI_CHANGE:
+        if pd.isna(p_chg) or pd.isna(oi_chg) or oi_chg == 0:
             return "NEUTRAL"
-
         if p_chg > 0 and oi_chg > 0:
             return "LONG BUILDUP"
         if p_chg < 0 and oi_chg > 0:
@@ -269,21 +191,20 @@ def calculate_position_builder(price_df, future_df):
             return "SHORT COVERING"
         if p_chg < 0 and oi_chg < 0:
             return "LONG UNWINDING"
-
         return "NEUTRAL"
 
     df["position_type"] = df.apply(classify, axis=1)
-
-    if USE_OI_PERCENT:
-        df["position_builder"] = df["oi_change_pct"]
-    else:
-        df["position_builder"] = df["oi_change"]
+    df["position_builder"] = df["oi_change_pct"]
 
     bullish = ["LONG BUILDUP", "SHORT COVERING"]
     bearish = ["SHORT BUILDUP", "LONG UNWINDING"]
 
-    df.loc[df["position_type"].isin(bullish), "position_builder"] = df["position_builder"].abs()
-    df.loc[df["position_type"].isin(bearish), "position_builder"] = -df["position_builder"].abs()
+    df.loc[df["position_type"].isin(bullish), "position_builder"] = df[
+        "position_builder"
+    ].abs()
+    df.loc[df["position_type"].isin(bearish), "position_builder"] = -df[
+        "position_builder"
+    ].abs()
     df.loc[df["position_type"] == "NEUTRAL", "position_builder"] = 0
 
     df["position_builder_scaled"] = df["position_builder"] * HISTOGRAM_SCALE
@@ -291,33 +212,10 @@ def calculate_position_builder(price_df, future_df):
 
 
 # ================================================================
-# 7. DRAW CANDLES & HISTOGRAM
+# STREAMLIT PLOTTING & UI
 # ================================================================
-
-def draw_candles(ax, df):
-    width = (3 / (24 * 60)) * 0.75
-    for _, row in df.iterrows():
-        t, o, h, l, c = row["timestamp"], row["open"], row["high"], row["low"], row["close"]
-        color = "#19b5a5" if c >= o else "#ff4d5a"
-        
-        ax.plot([t, t], [l, h], color=color, linewidth=0.8, zorder=2)
-        bottom = min(o, c)
-        height = max(abs(c - o), df["close"].mean() * 0.00002)
-        ax.bar(t, height, bottom=bottom, width=width, color=color, edgecolor=color, linewidth=0, zorder=3)
-
-
-def draw_position_builder(ax, df):
-    width = (3 / (24 * 60)) * 0.78
-    values = df["position_builder_scaled"]
-    colors = np.where(values >= 0, "#12665f", "#713437")
-
-    ax.bar(df["timestamp"], values, width=width, color=colors, edgecolor=colors, linewidth=0)
-    ax.axhline(0, linewidth=0.8, color="#30343b")
-
-
-def plot_chart(df, future_symbol):
-    plt.close("all")
-    fig = plt.figure(figsize=(FIG_WIDTH, FIG_HEIGHT), facecolor="#0c1117")
+def render_chart(df, future_symbol):
+    fig = plt.figure(figsize=(14, 7), facecolor="#0c1117")
     gs = fig.add_gridspec(5, 1, hspace=0.04)
 
     ax_price = fig.add_subplot(gs[:4, 0])
@@ -326,51 +224,120 @@ def plot_chart(df, future_symbol):
     ax_price.set_facecolor("#0c1117")
     ax_position.set_facecolor("#0c1117")
 
-    draw_candles(ax_price, df)
-    draw_position_builder(ax_position, df)
+    # Draw Candles
+    width = (3 / (24 * 60)) * 0.75
+    for _, row in df.iterrows():
+        t, o, h, l, c = (
+            row["timestamp"],
+            row["open"],
+            row["high"],
+            row["low"],
+            row["close"],
+        )
+        color = "#19b5a5" if c >= o else "#ff4d5a"
+        ax_price.plot([t, t], [l, h], color=color, linewidth=0.8, zorder=2)
+        bottom = min(o, c)
+        height = max(abs(c - o), df["close"].mean() * 0.00002)
+        ax_price.bar(
+            t,
+            height,
+            bottom=bottom,
+            width=width,
+            color=color,
+            edgecolor=color,
+            linewidth=0,
+            zorder=3,
+        )
 
+    # Draw Position Builder Histogram
+    p_width = (3 / (24 * 60)) * 0.78
+    values = df["position_builder_scaled"]
+    colors = np.where(values >= 0, "#12665f", "#713437")
+    ax_position.bar(
+        df["timestamp"],
+        values,
+        width=p_width,
+        color=colors,
+        edgecolor=colors,
+        linewidth=0,
+    )
+    ax_position.axhline(0, linewidth=0.8, color="#30343b")
+
+    # Labels & Aesthetics
     last_price = df["close"].iloc[-1]
     ax_price.set_title(
         f"NIFTY 50   |   3m   |   Last: {last_price:.2f}",
-        loc="left", fontsize=15, fontweight="bold", color="white", pad=12
+        loc="left",
+        fontsize=13,
+        fontweight="bold",
+        color="white",
+        pad=10,
     )
-
-    ax_position.text(0.005, 0.90, "POSITION BUILDERS", transform=ax_position.transAxes, fontsize=9, fontweight="bold", color="#b8c0cc", va="top")
-    ax_price.text(0.995, 0.97, f"OI Source: {future_symbol}", transform=ax_price.transAxes, ha="right", va="top", fontsize=8, color="#9aa4b2")
+    ax_position.text(
+        0.005,
+        0.88,
+        "POSITION BUILDER HISTOGRAM",
+        transform=ax_position.transAxes,
+        fontsize=8,
+        fontweight="bold",
+        color="#b8c0cc",
+        va="top",
+    )
+    ax_price.text(
+        0.995,
+        0.95,
+        f"OI Source: {future_symbol}",
+        transform=ax_price.transAxes,
+        ha="right",
+        va="top",
+        fontsize=8,
+        color="#9aa4b2",
+    )
 
     for ax in [ax_price, ax_position]:
         for spine in ax.spines.values():
             spine.set_visible(False)
+        ax.tick_params(colors="#89929e", labelsize=8)
 
+    ax_price.tick_params(labelbottom=False)
     ax_position.xaxis.set_major_locator(mdates.MinuteLocator(interval=30))
     ax_position.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
 
-    plt.show()
+    st.pyplot(fig)
 
 
 # ================================================================
-# 8. MAIN EXECUTION
+# MAIN ENTRYPOINT
 # ================================================================
+if st.button("Run Position Builder"):
+    if not ACCESS_TOKEN:
+        st.error("Please provide a valid Upstox Access Token.")
+        st.stop()
 
-def main():
-    print("\n=================================================")
-    print("     NIFTY 50 - 3 MINUTE POSITION BUILDER        ")
-    print("=================================================")
+    try:
+        with st.spinner("Fetching NIFTY Index and Futures data..."):
+            idx_df = filter_market_hours(get_nifty_index_intraday())
+            fut_key, fut_symbol = find_nearest_nifty_future()
+            fut_df = filter_market_hours(get_nifty_future_intraday(fut_key))
 
-    if not ACCESS_TOKEN or ACCESS_TOKEN == "YOUR_UPSTOX_ACCESS_TOKEN":
-        raise RuntimeError("Please enter a valid Upstox ACCESS_TOKEN.")
+            builder_df = calculate_position_builder(idx_df, fut_df)
 
-    index_df = filter_market_hours(get_nifty_index_intraday())
-    future_key = find_nearest_nifty_future()
-    future_df = filter_market_hours(get_nifty_future_intraday(future_key))
+        st.success(f"Connected successfully to {fut_symbol}")
+        render_chart(builder_df, fut_symbol)
 
-    df = calculate_position_builder(index_df, future_df)
+        st.subheader("Recent Position Builder Data")
+        st.dataframe(
+            builder_df[
+                [
+                    "timestamp",
+                    "close",
+                    "future_oi",
+                    "position_type",
+                    "position_builder_scaled",
+                ]
+            ].tail(15),
+            use_container_width=True,
+        )
 
-    print("\nLATEST POSITION BUILDER DATA:")
-    print(df[["timestamp", "close", "future_oi", "position_type", "position_builder_scaled"]].tail(10).to_string(index=False))
-
-    plot_chart(df, future_key)
-
-
-if __name__ == "__main__":
-    main()
+    except Exception as err:
+        st.error(f"Execution Error: {str(err)}")
