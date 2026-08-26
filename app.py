@@ -10,10 +10,9 @@ import pandas as pd
 import requests
 import streamlit as st
 
-# Auto-refresh helper
+# Auto-refresh helper (Re-runs app every 180 seconds / 3 minutes)
 try:
     from streamlit_autorefresh import st_autorefresh
-    # Refresh every 3 minutes (180,000 milliseconds)
     st_autorefresh(interval=180000, key="position_builder_autorefresh")
 except ImportError:
     pass
@@ -22,7 +21,7 @@ except ImportError:
 # CONFIGURATION & CONSTANTS
 # ================================================================
 st.set_page_config(page_title="NIFTY 50 Position Builder", layout="wide")
-st.title("📈 NIFTY 50 - 3 Minute Position Builder")
+st.title("📈 NIFTY 50 - Live 3 Minute Position Builder")
 
 ACCESS_TOKEN = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI6M0FZSEUiLCJqdGkiOiI6YThkNTc1Y2Y4MTJmNjA0MzcxZDNlM2MiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc4NzY0NzgzNiwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzg3Njk1MjAwfQ.Z4zP9w3MecFeZEcX5sUt4YdhxS6skp25fbKOv8-_gPU"
 
@@ -33,12 +32,13 @@ MARKET_END = "15:30"
 IST = ZoneInfo("Asia/Kolkata")
 
 # ================================================================
-# API HELPERS
+# API HELPERS (UNCALCHED FOR LIVE DATA)
 # ================================================================
 def get_headers(token):
     return {
         "Accept": "application/json",
         "Authorization": f"Bearer {token.strip()}",
+        "Cache-Control": "no-cache"
     }
 
 def upstox_get(url, token, params=None):
@@ -58,6 +58,7 @@ def upstox_get(url, token, params=None):
 
     return data
 
+# NO CACHE - Forces fresh API fetch every re-run
 def get_nifty_index_intraday(token):
     encoded_key = quote(NIFTY_INDEX_KEY, safe="")
     url = f"https://api.upstox.com/v3/historical-candle/intraday/{encoded_key}/minutes/{INTERVAL}"
@@ -78,7 +79,8 @@ def get_nifty_index_intraday(token):
     )
     return df.sort_values("timestamp").reset_index(drop=True)
 
-@st.cache_data(ttl=300)
+# CACHED - Instruments only need to be downloaded once per session
+@st.cache_data(ttl=3600)
 def fetch_upstox_nifty_instruments():
     url = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.csv.gz"
 
@@ -128,6 +130,7 @@ def fetch_upstox_nifty_instruments():
     except Exception as e:
         raise RuntimeError(f"Master file parsing error: {str(e)}")
 
+# NO CACHE - Fetches live OI per derivative strike
 def get_derivative_intraday(token, instrument_key):
     if not instrument_key:
         return pd.DataFrame()
@@ -176,14 +179,11 @@ def calculate_tradefinder_position_builder(price_df, ce_df, pe_df):
     if df.empty:
         raise RuntimeError("Timestamp alignment mismatch across market feeds.")
 
-    # 3-minute difference per bar for CE & PE
     df["ce_oi_diff"] = df["ce_oi"].diff(1).fillna(0)
     df["pe_oi_diff"] = df["pe_oi"].diff(1).fillna(0)
 
-    # Net Directional Delta
     df["net_oi_change"] = df["pe_oi_diff"] - df["ce_oi_diff"]
     
-    # Scale to [-100, 100] range
     max_val = max(abs(df["net_oi_change"].min()), abs(df["net_oi_change"].max()), 1)
     df["position_builder_scaled"] = (df["net_oi_change"] / max_val) * 100
 
@@ -241,8 +241,10 @@ def render_chart(df, source_label):
     ax_position.set_ylim(-110, 110)
 
     last_price = df["close"].iloc[-1]
+    last_time = df["timestamp"].iloc[-1].strftime("%H:%M:%S")
+
     ax_price.set_title(
-        f"NIFTY 50   |   3m   |   Last: {last_price:.2f}",
+        f"NIFTY 50   |   3m   |   Last: {last_price:.2f}   |   Updated: {last_time} IST",
         loc="left",
         fontsize=13,
         fontweight="bold",
@@ -291,7 +293,7 @@ try:
         horizontal=True,
     )
 
-    with st.spinner("Fetching NIFTY Index and Weekly Options Data..."):
+    with st.spinner("Fetching Live NIFTY Index and Weekly Options Data..."):
         idx_df = filter_market_hours(get_nifty_index_intraday(ACCESS_TOKEN))
         fut_key, fut_sym, opts_df, key_col, sym_col, type_col = (
             fetch_upstox_nifty_instruments()
@@ -322,7 +324,7 @@ try:
                     else:
                         ce_df = pd.merge(ce_df, opt_sub, on="timestamp", how="outer")
                         ce_df["ce_oi"] = ce_df["ce_oi"].fillna(0) + ce_df["oi"].fillna(0)
-                        ce_df.drop(columns=["oi"], inplace=True)
+                        ce_df.drop(columns={"oi"], inplace=True)
 
             pe_df = None
             for _, row in pe_opts.iterrows():
@@ -334,7 +336,7 @@ try:
                     else:
                         pe_df = pd.merge(pe_df, opt_sub, on="timestamp", how="outer")
                         pe_df["pe_oi"] = pe_df["pe_oi"].fillna(0) + pe_df["oi"].fillna(0)
-                        pe_df.drop(columns=["oi"], inplace=True)
+                        pe_df.drop(columns={"oi"], inplace=True)
 
             if ce_df is not None and pe_df is not None:
                 ce_df = ce_df.sort_values("timestamp").ffill().dropna()
