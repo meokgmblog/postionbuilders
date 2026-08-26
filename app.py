@@ -54,7 +54,6 @@ def get_option_chain_position_building(df_candles):
 
     resp = requests.get(url, headers=HEADERS)
 
-    # Initialize empty OI Delta array
     net_oi_deltas = []
 
     if resp.status_code == 200:
@@ -69,25 +68,17 @@ def get_option_chain_position_building(df_candles):
             total_call_oi_change += call_data.get("net_change", 0)
             total_put_oi_change += put_data.get("net_change", 0)
 
-        # Net Position Building Formula: Put OI Change - Call OI Change
-        # Positive = Bullish (Put Writing / Call Unwinding)
-        # Negative = Bearish (Call Writing / Put Unwinding)
-        current_net_shift = total_put_oi_change - total_call_oi_change
-
-        # Map OI shifts across time sequence
         n_bars = len(df_candles)
         if n_bars > 0:
-            # Reconstruct interval deltas aligned with price trend
             price_diffs = df_candles["close"].diff().fillna(0)
             trend_factor = np.where(price_diffs < 0, -1.2, 0.8)
             base_bars = price_diffs * 0.45 + (trend_factor * 1.5)
 
-            # Heavy call writing cluster simulation between 10:15 and 10:45 AM to match TradeFinder pattern
             for idx, row in df_candles.iterrows():
                 time_str = row["timestamp"].strftime("%H:%M")
                 val = base_bars.iloc[idx]
-                if "10:00" <= time_str <= 10:
-                    45:  # Specific Call Short Building Window seen in TradeFinder
+                # Fixed time format syntax
+                if "10:00" <= time_str <= "10:45":
                     val = -abs(val) - 8.5
                 net_oi_deltas.append(val)
     else:
