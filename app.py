@@ -13,7 +13,7 @@ import streamlit as st
 st.set_page_config(page_title="NIFTY 50 Position Builder", layout="wide")
 st.title("📈 NIFTY 50 - 3 Minute Position Builder")
 
-# Pre-populated Access Token
+# Your Access Token pre-populated
 DEFAULT_TOKEN = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI6M0FZSEUiLCJqdGkiOiI6YThkNTc1Y2Y4MTJmNjA0MzcxZDNlM2MiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc4NzY0NzgzNiwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzg3Njk1MjAwfQ.Z4zP9w3MecFeZEcX5sUt4YdhxS6skp25fbKOv8-_gPU"
 
 access_token_input = st.text_input(
@@ -33,9 +33,10 @@ HISTOGRAM_SCALE = 1000
 # API HELPERS
 # ================================================================
 def get_headers(token):
+    clean_token = token.strip()
     return {
         "Accept": "application/json",
-        "Authorization": f"Bearer {token.strip()}",
+        "Authorization": f"Bearer {clean_token}",
     }
 
 
@@ -78,7 +79,7 @@ def get_nifty_index_intraday(token):
 
 
 def find_nearest_nifty_future(token):
-    # Try fetching via Option/Contract API
+    # Retrieve active contracts for Nifty 50 index
     url = "https://api.upstox.com/v2/option/contract"
     params = {"instrument_key": NIFTY_INDEX_KEY}
 
@@ -105,7 +106,7 @@ def find_nearest_nifty_future(token):
     except Exception:
         pass
 
-    # Fallback to general instrument search
+    # Secondary Search fallback
     if not valid_futures:
         try:
             search_url = "https://api.upstox.com/v2/instruments/search"
@@ -131,12 +132,9 @@ def find_nearest_nifty_future(token):
             pass
 
     if not valid_futures:
-        # Static monthly fallback string if dynamic lookup returns empty
-        now = datetime.now()
-        curr_month = now.strftime("%b").upper()
-        curr_year = now.strftime("%y")
-        fallback_key = f"NSE_FO|NIFTY{curr_year}{curr_month}FUT"
-        return fallback_key, f"NIFTY {curr_month} FUT"
+        raise RuntimeError(
+            "Could not automatically resolve an active NIFTY Future instrument key from Upstox API."
+        )
 
     futures_df = pd.DataFrame(valid_futures).sort_values("expiry")
     selected = futures_df.iloc[0]
