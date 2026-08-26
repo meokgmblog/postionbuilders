@@ -161,7 +161,6 @@ def get_expiry_dates(spot_key):
                 list({item["expiry"] for item in data if "expiry" in item})
             )
             today_str = datetime.now().strftime("%Y-%m-%d")
-            # Filter valid upcoming expiries
             valid_expiries = [e for e in expiries if e >= today_str]
             if valid_expiries:
                 return valid_expiries
@@ -182,31 +181,13 @@ def fetch_option_chain(spot_key, expiry_date):
     return []
 
 
-def fetch_strike_oi_parallel(keys, timeframe):
-    def worker(key):
-        df_1m = fetch_raw_1min_candles(key)
-        if not df_1m.empty:
-            df_res = resample_candles(df_1m, timeframe)
-            # Retain absolute OI for accurate cumulative change baseline
-            df_res["oi_diff"] = df_res["oi"].diff().fillna(df_res["oi"])
-            return df_res[["timestamp", "oi_diff"]]
-        return pd.DataFrame()
-
-    results = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=12) as executor:
-        futures = [executor.submit(worker, k) for k in keys]
-        for f in concurrent.futures.as_completed(futures):
-            res = f.result()
-            if not res.empty:
-                results.append(res)
-
-    if results:
-        return (
-            pd.concat(results)
-            .groupby("timestamp", as_index=False)["oi_diff"]
-            .sum()
-        )
-    return pd.DataFrame()
+def fetch_strike_oi_series(key, timeframe):
+    df_1m = fetch_raw_1min_candles(key)
+    if not df_1m.empty:
+        df_res = resample_candles(df_1m, timeframe)
+        df_res["oi_diff"] = df_res["oi"].diff().fillna(df_res["oi"])
+        return df_res.set_index("timestamp")["oi_diff"]
+    return pd.Series(dtype=float)
 
 
 def build_options_apex_dataset(timeframe, num_strikes, selected_expiry):
@@ -224,55 +205,65 @@ def build_options_apex_dataset(timeframe, num_strikes, selected_expiry):
         )
         return df_spot
 
-    chain = sorted(chain, key=lambda x: x.get("strike_price", 0))
+    # Map available strikes in the chain
+    chain_sorted = sorted(chain, key=lambda x: x.get("strike_price", 0))
+    strikes = [item["strike_price"] for item in chain_sorted]
 
-    # Match strike window against overall median spot price for stable structural comparisons
-    spot_price = df_spot["close"].median()
+    # Collect all candidate option keys across the chain
+    all_keys = []
+    for item in chain_sorted:
+        if "call_options" in item:
+            all_keys.append(item["call_options"]["instrument_key"])
+        if "put_options" in item:
+            all_keys.append(item["put_options"]["instrument_key"])
 
-    closest_idx = min(
-        range(len(chain)),
-        key=lambda i: abs(chain[i]["strike_price"] - spot_price),
-    )
+    # Fetch OI series in parallel for candidate strikes
+    oi_map = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
+        future_to_key = {
+            executor.submit(fetch_strike_oi_series, k, timeframe): k
+            for k in all_keys
+        }
+        for future in concurrent.futures.as_completed(future_to_key):
+            k = future_to_key[future]
+            res = future.result()
+            if not res.empty:
+                oi_map[k] = res
 
-    start_i = max(0, closest_idx - num_strikes)
-    end_i = min(len(chain), closest_idx + num_strikes + 1)
-    selected = chain[start_i:end_i]
+    # Calculate Position Builder dynamically per candle based on rolling spot price
+    pos_builder_list = []
+    for _, row in df_spot.iterrows():
+        ts = row["timestamp"]
+        spot = row["close"]
 
-    call_keys = [
-        item["call_options"]["instrument_key"]
-        for item in selected
-        if "call_options" in item
-    ]
-    put_keys = [
-        item["put_options"]["instrument_key"]
-        for item in selected
-        if "put_options" in item
-    ]
+        # Find closest ATM strike for this specific candle
+        closest_idx = min(
+            range(len(strikes)), key=lambda i: abs(strikes[i] - spot)
+        )
+        start_i = max(0, closest_idx - num_strikes)
+        end_i = min(len(strikes), closest_idx + num_strikes + 1)
+        selected_items = chain_sorted[start_i:end_i]
 
-    df_calls = fetch_strike_oi_parallel(call_keys, timeframe)
-    df_puts = fetch_strike_oi_parallel(put_keys, timeframe)
+        call_diff_sum = 0
+        put_diff_sum = 0
 
-    merged = pd.merge(
-        df_spot,
-        df_calls.rename(columns={"oi_diff": "call_oi_diff"}),
-        on="timestamp",
-        how="left",
-    )
-    merged = pd.merge(
-        merged,
-        df_puts.rename(columns={"oi_diff": "put_oi_diff"}),
-        on="timestamp",
-        how="left",
-    )
+        for item in selected_items:
+            c_key = item.get("call_options", {}).get("instrument_key")
+            p_key = item.get("put_options", {}).get("instrument_key")
 
-    merged["call_oi_diff"] = merged["call_oi_diff"].fillna(0)
-    merged["put_oi_diff"] = merged["put_oi_diff"].fillna(0)
-    merged["pos_builder"] = merged["put_oi_diff"] - merged["call_oi_diff"]
-    merged["color"] = merged["pos_builder"].apply(
+            if c_key in oi_map and ts in oi_map[c_key].index:
+                call_diff_sum += oi_map[c_key].loc[ts]
+            if p_key in oi_map and ts in oi_map[p_key].index:
+                put_diff_sum += oi_map[p_key].loc[ts]
+
+        pos_builder_list.append(put_diff_sum - call_diff_sum)
+
+    df_spot["pos_builder"] = pos_builder_list
+    df_spot["color"] = df_spot["pos_builder"].apply(
         lambda x: "#089981" if x >= 0 else "#f23645"
     )
 
-    return merged
+    return df_spot
 
 
 # ==========================================
