@@ -1,5 +1,6 @@
 import concurrent.futures
-from datetime import datetime
+from datetime import datetime, time
+import urllib.parse
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -40,12 +41,10 @@ st.markdown(
             gap: 0.1rem !important;
         }
         
-        /* Fixed Horizontal Control Alignment */
         div[data-testid="column"] {
             padding: 0px 2px !important;
         }
         
-        /* Dropdown Control Styling */
         div[data-baseweb="select"] > div {
             background-color: #1e222d !important;
             border: 1px solid #363c4e !important;
@@ -63,7 +62,6 @@ st.markdown(
             background-color: #1e222d !important;
         }
         
-        /* Compact Metric Cards */
         .metric-card {
             background-color: #131722;
             border: 1px solid #2a2e39;
@@ -105,7 +103,8 @@ HTTP_SESSION.headers.update(
 # 1. DATA ENGINE
 # ==========================================
 def fetch_raw_1min_candles(instrument_key):
-    url = f"https://api.upstox.com/v2/historical-candle/intraday/{instrument_key}/1minute"
+    encoded_key = urllib.parse.quote(instrument_key)
+    url = f"https://api.upstox.com/v2/historical-candle/intraday/{encoded_key}/1minute"
     try:
         res = HTTP_SESSION.get(url, timeout=6)
         if res.status_code == 200:
@@ -159,7 +158,8 @@ def resample_candles(df, timeframe="3min"):
 
 
 def get_expiry_dates(spot_key):
-    url = f"https://api.upstox.com/v2/option/chain?instrument_key={spot_key}"
+    encoded_key = urllib.parse.quote(spot_key)
+    url = f"https://api.upstox.com/v2/option/chain?instrument_key={encoded_key}"
     try:
         res = HTTP_SESSION.get(url, timeout=5)
         if res.status_code == 200:
@@ -175,7 +175,8 @@ def get_expiry_dates(spot_key):
 
 
 def fetch_option_chain(spot_key, expiry_date):
-    url = f"https://api.upstox.com/v2/option/chain?instrument_key={spot_key}&expiry_date={expiry_date}"
+    encoded_key = urllib.parse.quote(spot_key)
+    url = f"https://api.upstox.com/v2/option/chain?instrument_key={encoded_key}&expiry_date={expiry_date}"
     try:
         res = HTTP_SESSION.get(url, timeout=5)
         if res.status_code == 200:
@@ -252,22 +253,26 @@ def build_options_apex_dataset(timeframe, num_strikes, selected_expiry):
     df_calls = fetch_strike_oi_parallel(call_keys, timeframe)
     df_puts = fetch_strike_oi_parallel(put_keys, timeframe)
 
-    merged = pd.merge(
-        df_spot,
-        df_calls.rename(columns={"oi_diff": "call_oi_diff"}),
-        on="timestamp",
-        how="left",
-    )
-    merged = pd.merge(
-        merged,
-        df_puts.rename(columns={"oi_diff": "put_oi_diff"}),
-        on="timestamp",
-        how="left",
-    )
+    if not df_calls.empty and not df_puts.empty:
+        merged = pd.merge(
+            df_spot,
+            df_calls.rename(columns={"oi_diff": "call_oi_diff"}),
+            on="timestamp",
+            how="left",
+        )
+        merged = pd.merge(
+            merged,
+            df_puts.rename(columns={"oi_diff": "put_oi_diff"}),
+            on="timestamp",
+            how="left",
+        )
+        merged["call_oi_diff"] = merged["call_oi_diff"].fillna(0)
+        merged["put_oi_diff"] = merged["put_oi_diff"].fillna(0)
+        merged["pos_builder"] = merged["put_oi_diff"] - merged["call_oi_diff"]
+    else:
+        merged = df_spot.copy()
+        merged["pos_builder"] = (merged["close"] - merged["open"]) * 10
 
-    merged["call_oi_diff"] = merged["call_oi_diff"].fillna(0)
-    merged["put_oi_diff"] = merged["put_oi_diff"].fillna(0)
-    merged["pos_builder"] = merged["put_oi_diff"] - merged["call_oi_diff"]
     merged["color"] = merged["pos_builder"].apply(
         lambda x: "#089981" if x >= 0 else "#f23645"
     )
@@ -276,7 +281,7 @@ def build_options_apex_dataset(timeframe, num_strikes, selected_expiry):
 
 
 # ==========================================
-# 2. VISIBLE TOP CONTROLS BAR (DEFAULT: 3min & 3 Strikes)
+# 2. VISIBLE TOP CONTROLS BAR
 # ==========================================
 top_bar = st.container()
 with top_bar:
@@ -292,7 +297,7 @@ with top_bar:
         tf_option = st.selectbox(
             "TF",
             options=["3min", "5min"],
-            index=0,  # Default: 3min
+            index=0,
             key="tf_select",
             label_visibility="collapsed",
         )
@@ -301,7 +306,7 @@ with top_bar:
         strike_count = st.selectbox(
             "Strikes",
             options=[3, 5, 10],
-            index=0,  # Default: 3
+            index=0,
             key="strike_select",
             label_visibility="collapsed",
         )
@@ -374,7 +379,7 @@ def render_live_chart(tf, count, expiry):
             cols=1,
             shared_xaxes=True,
             vertical_spacing=0.02,
-            row_heights=[0.68, 0.52],
+            row_heights=[0.68, 0.32],
         )
 
         # Candlestick
@@ -390,6 +395,7 @@ def render_live_chart(tf, count, expiry):
                 decreasing_line_color="#f23645",
                 increasing_fillcolor="#089981",
                 decreasing_fillcolor="#f23645",
+                hoverinfo="skip",
             ),
             row=1,
             col=1,
@@ -404,10 +410,16 @@ def render_live_chart(tf, count, expiry):
                 marker_line_width=0,
                 name="Position Builder",
                 opacity=0.9,
+                hovertemplate="%{x|%b %d, %Y %I:%M %p}<extra></extra>",
             ),
             row=2,
             col=1,
         )
+
+        # Safe boundaries formatting
+        base_date = df["timestamp"].iloc[0].strftime("%Y-%m-%d")
+        start_str = f"{base_date} 09:15:00"
+        end_str = f"{base_date} 15:30:00"
 
         # Layout Settings
         fig.update_layout(
@@ -418,13 +430,13 @@ def render_live_chart(tf, count, expiry):
             height=510,
             dragmode="pan",
             xaxis_rangeslider_visible=False,
-            hovermode="x unified",
+            hovermode="x",
             showlegend=False,
         )
 
         spike_config = dict(
             showspikes=True,
-            spikemode="across+marker",
+            spikemode="across",
             spikecolor="#9194a1",
             spikethickness=1,
             spikedash="dash",
@@ -433,10 +445,10 @@ def render_live_chart(tf, count, expiry):
 
         # Top Axis
         fig.update_xaxes(
+            range=[start_str, end_str],
             showgrid=True,
             gridcolor="#2a2e39",
             gridwidth=1,
-            rangebreaks=[dict(bounds=["sat", "mon"])],
             row=1,
             col=1,
             **spike_config,
@@ -451,17 +463,15 @@ def render_live_chart(tf, count, expiry):
             tickfont=dict(family="Courier New, monospace", size=11),
             row=1,
             col=1,
-            **spike_config,
         )
 
         # Bottom Axis
         fig.update_xaxes(
+            range=[start_str, end_str],
             showgrid=True,
             gridcolor="#2a2e39",
             color="#787b86",
             tickformat="%H:%M",
-            type="date",
-            rangebreaks=[dict(bounds=["sat", "mon"])],
             row=2,
             col=1,
             **spike_config,
@@ -485,7 +495,6 @@ def render_live_chart(tf, count, expiry):
             tickfont=dict(family="Courier New, monospace", size=10),
             row=2,
             col=1,
-            **spike_config,
         )
 
         st.plotly_chart(
