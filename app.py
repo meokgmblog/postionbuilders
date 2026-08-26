@@ -202,10 +202,13 @@ def filter_market_hours(df):
 
 
 # ================================================================
-# POSITION BUILDER CALCULATION (NET PE vs CE DIRECTIONAL OI)
+# POSITION BUILDER CALCULATION
 # ================================================================
 def calculate_position_builder(price_df, deriv_df, is_options=True):
-    df = pd.merge(price_df, deriv_df, on="timestamp", how="inner").sort_values(
+    # Select only OHLC from price_df to avoid column conflicts with deriv_df
+    clean_price_df = price_df[["timestamp", "open", "high", "low", "close"]].copy()
+
+    df = pd.merge(clean_price_df, deriv_df, on="timestamp", how="inner").sort_values(
         "timestamp"
     )
 
@@ -382,13 +385,13 @@ try:
                     get_derivative_intraday(ACCESS_TOKEN, row[key_col])
                 )
                 if not opt_data.empty:
+                    opt_sub = opt_data[["timestamp", "oi"]].copy()
                     if ce_df is None:
-                        ce_df = opt_data[["timestamp", "oi"]].copy()
-                        ce_df.rename(columns={"oi": "ce_oi"}, inplace=True)
+                        ce_df = opt_sub.rename(columns={"oi": "ce_oi"})
                     else:
                         ce_df = pd.merge(
                             ce_df,
-                            opt_data[["timestamp", "oi"]],
+                            opt_sub,
                             on="timestamp",
                             how="outer",
                         )
@@ -403,13 +406,13 @@ try:
                     get_derivative_intraday(ACCESS_TOKEN, row[key_col])
                 )
                 if not opt_data.empty:
+                    opt_sub = opt_data[["timestamp", "oi"]].copy()
                     if pe_df is None:
-                        pe_df = opt_data[["timestamp", "oi"]].copy()
-                        pe_df.rename(columns={"oi": "pe_oi"}, inplace=True)
+                        pe_df = opt_sub.rename(columns={"oi": "pe_oi"})
                     else:
                         pe_df = pd.merge(
                             pe_df,
-                            opt_data[["timestamp", "oi"]],
+                            opt_sub,
                             on="timestamp",
                             how="outer",
                         )
@@ -431,7 +434,7 @@ try:
                 fut_df = filter_market_hours(
                     get_derivative_intraday(ACCESS_TOKEN, fut_key)
                 )
-                fut_df.rename(columns={"oi": "deriv_oi"}, inplace=True)
+                fut_df = fut_df[["timestamp", "oi"]].rename(columns={"oi": "deriv_oi"})
                 builder_df = calculate_position_builder(
                     idx_df, fut_df, is_options=False
                 )
@@ -440,7 +443,7 @@ try:
             fut_df = filter_market_hours(
                 get_derivative_intraday(ACCESS_TOKEN, fut_key)
             )
-            fut_df.rename(columns={"oi": "deriv_oi"}, inplace=True)
+            fut_df = fut_df[["timestamp", "oi"]].rename(columns={"oi": "deriv_oi"})
             builder_df = calculate_position_builder(
                 idx_df, fut_df, is_options=False
             )
