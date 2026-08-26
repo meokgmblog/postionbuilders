@@ -9,6 +9,7 @@ import pandas as pd
 import pytz
 import requests
 import streamlit as st
+from zoneinfo import ZoneInfo
 
 # ================================================================
 # CONFIGURATION & CONSTANTS
@@ -23,7 +24,7 @@ INTERVAL = 3
 MARKET_START = "09:15"
 MARKET_END = "15:30"
 HISTOGRAM_SCALE = 1000
-IST = pytz.timezone("Asia/Kolkata")
+IST = ZoneInfo("Asia/Kolkata")
 
 # ================================================================
 # API HELPERS
