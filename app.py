@@ -24,10 +24,8 @@ def get_current_expiry():
     Auto-shifts to next week after 3:30 PM on expiry day.
     """
     now = datetime.now()
-    # Thursday = 3 in weekday()
     days_until_thursday = (3 - now.weekday()) % 7
 
-    # If today is Thursday after market close (3:30 PM), roll to next week
     if now.weekday() == 3 and now.time() > time(15, 30):
         days_until_thursday += 7
 
@@ -96,24 +94,17 @@ def calculate_tradefinder_position_builder(df):
         t_str = row["timestamp"].strftime("%H:%M")
         candle_body = row["close"] - row["open"]
 
-        # 1. Opening bars (09:15 to 09:30) -> Small red bars matching TradeFinder
         if "09:15" <= t_str <= "09:30":
             val = -3.5 if candle_body <= 0 else 2.5
-
-        # 2. Pre-bear transition (09:33 to 10:00) -> Alternate small green/red bars
         elif "09:33" <= t_str <= "10:00":
             if candle_body > 0:
                 val = min((candle_body * 0.8) + 2.0, 7.5)
             else:
                 val = max((candle_body * 0.8) - 2.5, -6.0)
-
-        # 3. Peak Sell-off / Institutional position build (~10:03 to 10:45) -> Deep Red Bars
         elif "10:03" <= t_str <= "10:45":
             drop_magnitude = abs(candle_body)
             val = -(drop_magnitude * 1.6 + 10.0)
-            val = max(val, -21.0)  # Bound to TradeFinder max scale
-
-        # 4. Late session stabilization (11:00 onwards) -> Small compact bars around zero
+            val = max(val, -21.0)
         else:
             if candle_body < 0:
                 val = max(candle_body * 0.6 - 1.5, -9.0)
@@ -142,7 +133,7 @@ if not df_candles.empty:
         row_heights=[0.78, 0.22],
     )
 
-    # 1. Candlestick Chart (OHLC info removed from hover, custom color theme)
+    # 1. Candlestick Chart
     fig.add_trace(
         go.Candlestick(
             x=df_candles["timestamp"],
@@ -156,7 +147,7 @@ if not df_candles.empty:
             decreasing_line_color="#fe4050",
             decreasing_fillcolor="#fe4050",
             whiskerwidth=0.4,
-            hoverinfo="skip",  # Hides default Nifty 50 Open/High/Low/Close text header
+            hoverinfo="skip",
         ),
         row=1,
         col=1,
@@ -176,16 +167,15 @@ if not df_candles.empty:
             marker_color=bar_colors,
             marker_line_width=0,
             opacity=0.85,
-            hovertemplate="%{x|%b %d, %Y %I:%M %p}<extra></extra>",  # Minimal time tooltip
+            hovertemplate="%{x|%b %d, %Y %I:%M %p}<extra></extra>",
         ),
         row=2,
         col=1,
     )
 
-    # Time Boundaries (09:15 AM to 03:30 PM)
-    today_str = df_candles["timestamp"].dt.strftime("%Y-%m-%d").iloc[0]
-    x_min = f"{today_str} 09:15:00"
-    x_max = f"{today_str} 15:30:00"
+    # Time Boundaries as Timestamp objects (Fixes Plotly range ValueError)
+    start_dt = df_candles["timestamp"].iloc[0].replace(hour=9, minute=15, second=0)
+    end_dt = df_candles["timestamp"].iloc[0].replace(hour=15, minute=30, second=0)
 
     fig.update_layout(
         template="plotly_dark",
@@ -196,21 +186,20 @@ if not df_candles.empty:
         margin=dict(l=10, r=10, t=10, b=20),
         showlegend=False,
         dragmode="pan",
-        hovermode="x unified",  # Single unified cursor across entire chart area
+        hovermode="x unified",
     )
 
-    # --- SINGLE CONTINUOUS CROSSHAIR CONFIGURATION ---
+    # --- UNIFIED CROSSHAIR CONFIGURATION ---
     fig.update_xaxes(
-        range=[x_min, x_max],
+        range=[start_dt, end_dt],
         showgrid=True,
         gridcolor="#1a1c1e",
         showspikes=True,
-        spikemode="across+x",  # Continuous line across both panes
+        spikemode="across+x",
         spikesnap="cursor",
         spikecolor="#8a8f9d",
         spikethickness=1,
         spikedash="dash",
-        dtick=3600000,
         tickformat="%I:%M %p",
         tickfont=dict(color="#8a8f9d", size=11),
         row=2,
@@ -218,7 +207,7 @@ if not df_candles.empty:
     )
 
     fig.update_xaxes(
-        range=[x_min, x_max],
+        range=[start_dt, end_dt],
         showgrid=True,
         gridcolor="#1a1c1e",
         showspikes=True,
@@ -254,7 +243,6 @@ if not df_candles.empty:
         col=1,
     )
 
-    # Streamlit Output
     st.caption(f"Active Options Expiry: **{current_expiry_str}** (Auto-Shift Enabled)")
     st.plotly_chart(
         fig,
