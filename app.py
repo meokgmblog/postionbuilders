@@ -10,6 +10,14 @@ import pandas as pd
 import requests
 import streamlit as st
 
+# Auto-refresh helper
+try:
+    from streamlit_autorefresh import st_autorefresh
+    # Refresh every 3 minutes (180,000 milliseconds)
+    st_autorefresh(interval=180000, key="position_builder_autorefresh")
+except ImportError:
+    pass
+
 # ================================================================
 # CONFIGURATION & CONSTANTS
 # ================================================================
@@ -70,7 +78,7 @@ def get_nifty_index_intraday(token):
     )
     return df.sort_values("timestamp").reset_index(drop=True)
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=300)
 def fetch_upstox_nifty_instruments():
     url = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.csv.gz"
 
@@ -157,7 +165,7 @@ def filter_market_hours(df):
     return df.drop(columns=["time"]).reset_index(drop=True)
 
 # ================================================================
-# POSITION BUILDER CALCULATION (TRADEFINDER PER-BAR DELTA)
+# POSITION BUILDER CALCULATION
 # ================================================================
 def calculate_tradefinder_position_builder(price_df, ce_df, pe_df):
     clean_price = price_df[["timestamp", "open", "high", "low", "close"]].copy()
@@ -168,15 +176,16 @@ def calculate_tradefinder_position_builder(price_df, ce_df, pe_df):
     if df.empty:
         raise RuntimeError("Timestamp alignment mismatch across market feeds.")
 
-    # Calculate 3-minute difference for Call and Put OI
+    # 3-minute difference per bar for CE & PE
     df["ce_oi_diff"] = df["ce_oi"].diff(1).fillna(0)
     df["pe_oi_diff"] = df["pe_oi"].diff(1).fillna(0)
 
-    # Net Directional OI Delta per bar = PE OI Change - CE OI Change
+    # Net Directional Delta
     df["net_oi_change"] = df["pe_oi_diff"] - df["ce_oi_diff"]
     
-    # Position builder value scaled for tradefinder histogram look
-    df["position_builder_scaled"] = df["net_oi_change"] / 1000
+    # Scale to [-100, 100] range
+    max_val = max(abs(df["net_oi_change"].min()), abs(df["net_oi_change"].max()), 1)
+    df["position_builder_scaled"] = (df["net_oi_change"] / max_val) * 100
 
     return df
 
@@ -229,6 +238,7 @@ def render_chart(df, source_label):
         linewidth=0,
     )
     ax_position.axhline(0, linewidth=0.8, color="#30343b")
+    ax_position.set_ylim(-110, 110)
 
     last_price = df["close"].iloc[-1]
     ax_price.set_title(
@@ -292,7 +302,6 @@ try:
             strike_col = "strike_price" if "strike_price" in opts_df.columns else "strike"
             opts_df["strike_num"] = pd.to_numeric(opts_df[strike_col], errors="coerce")
 
-            # Wider ATM Range (+- 300 pts, ~12 strikes) for full OI capture
             atm_strike = round(last_close / 50) * 50
             min_stk, max_stk = atm_strike - 300, atm_strike + 300
             atm_opts = opts_df[(opts_df["strike_num"] >= min_stk) & (opts_df["strike_num"] <= max_stk)].copy()
@@ -343,9 +352,6 @@ try:
 
     st.success(f"Connected to {source_tag} | Timezone: IST (UTC+5:30)")
     render_chart(builder_df, source_tag)
-
-    st.subheader("Recent Position Builder Data (IST)")
-    st.dataframe(builder_df.tail(15), use_container_width=True)
 
 except Exception as err:
     st.error(f"Execution Error: {str(err)}")
