@@ -1,3 +1,5 @@
+import gzip
+import io
 from datetime import datetime
 from urllib.parse import quote
 import matplotlib.dates as mdates
@@ -76,60 +78,46 @@ def get_nifty_index_intraday(token):
     return df.sort_values("timestamp").reset_index(drop=True)
 
 
-def find_nearest_nifty_future(token):
-    today = pd.Timestamp(datetime.now().date())
+@st.cache_data(ttl=3600)
+def fetch_upstox_nifty_futures_key():
+    """
+    Downloads Upstox official NSE_FO master file to find the active NIFTY Future instrument key.
+    Cached for 1 hour to ensure fast app execution.
+    """
+    url = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.csv.gz"
     
-    # Method 1: Option Contract Chain Endpoint
     try:
-        url = "https://api.upstox.com/v2/option/contract"
-        params = {"instrument_key": NIFTY_INDEX_KEY}
-        res = upstox_get(url, token, params=params)
-        contracts = res.get("data", [])
+        res = requests.get(url, timeout=30)
+        if res.status_code != 200:
+            raise Exception("Failed to fetch Upstox instrument file.")
+            
+        with gzip.open(io.BytesIO(res.content), "rt") as f:
+            df = pd.read_csv(f)
+            
+        # Filter strictly for NIFTY Futures
+        nifty_futs = df[
+            (df["name"] == "NIFTY") & 
+            (df["instrument_type"] == "FUT") & 
+            (df["segment"] == "NSE_FO")
+        ].copy()
+        
+        if nifty_futs.empty:
+            raise Exception("No NIFTY Futures found in master file.")
 
-        valid_futures = []
-        for item in contracts:
-            if item.get("instrument_type") == "FUT":
-                expiry = item.get("expiry")
-                if expiry:
-                    exp_dt = pd.Timestamp(expiry)
-                    if exp_dt.date() >= today.date():
-                        valid_futures.append(
-                            {
-                                "key": item.get("instrument_key"),
-                                "symbol": item.get("trading_symbol"),
-                                "expiry": exp_dt,
-                            }
-                        )
-        if valid_futures:
-            futures_df = pd.DataFrame(valid_futures).sort_values("expiry")
-            return futures_df.iloc[0]["key"], futures_df.iloc[0]["symbol"]
-    except Exception:
-        pass
+        nifty_futs["expiry_dt"] = pd.to_datetime(nifty_futs["expiry"])
+        today = pd.Timestamp(datetime.now().date())
+        
+        # Select active contract with nearest expiry
+        active_futs = nifty_futs[nifty_futs["expiry_dt"].dt.date >= today.date()].sort_values("expiry_dt")
+        
+        if active_futs.empty:
+            raise Exception("No active unexpired NIFTY Futures found.")
 
-    # Method 2: Dynamic Month & Year Key Construction (Robust Fallback)
-    now = datetime.now()
-    month_str = now.strftime("%b").upper()
-    year_str = now.strftime("%y")
-    
-    # Standard Upstox Futures key formats
-    candidate_keys = [
-        (f"NSE_FO|NIFTY{year_str}{month_str}FUT", f"NIFTY {month_str} FUT"),
-        (f"NSE_FO|NIFTY{year_str}AUGFUT", "NIFTY AUG FUT"),
-    ]
+        selected = active_futs.iloc[0]
+        return selected["instrument_key"], selected["trading_symbol"]
 
-    for key, symbol in candidate_keys:
-        try:
-            encoded_key = quote(key, safe="")
-            url = f"https://api.upstox.com/v3/historical-candle/intraday/{encoded_key}/minutes/{INTERVAL}"
-            res = upstox_get(url, token)
-            if res.get("data", {}).get("candles"):
-                return key, symbol
-        except Exception:
-            continue
-
-    raise RuntimeError(
-        "Unable to retrieve NIFTY Future instrument key. Please check your Upstox Token permissions."
-    )
+    except Exception as e:
+        raise RuntimeError(f"Failed to resolve NIFTY Future instrument key from Upstox Master File: {str(e)}")
 
 
 def get_nifty_future_intraday(token, future_key):
@@ -319,16 +307,16 @@ if st.button("Run Position Builder"):
         st.stop()
 
     try:
-        with st.spinner("Fetching NIFTY Index and Futures data..."):
+        with st.spinner("Fetching NIFTY Index and active Futures contract..."):
             idx_df = filter_market_hours(get_nifty_index_intraday(token))
-            fut_key, fut_symbol = find_nearest_nifty_future(token)
+            fut_key, fut_symbol = fetch_upstox_nifty_futures_key()
             fut_df = filter_market_hours(
                 get_nifty_future_intraday(token, fut_key)
             )
 
             builder_df = calculate_position_builder(idx_df, fut_df)
 
-        st.success(f"Connected successfully to {fut_symbol}")
+        st.success(f"Connected successfully to {fut_symbol} (Key: {fut_key})")
         render_chart(builder_df, fut_symbol)
 
         st.subheader("Recent Position Builder Data")
