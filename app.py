@@ -230,6 +230,31 @@ def get_nifty_index_intraday():
 #
 # ================================================================
 
+def main():
+
+    st.title("NIFTY Position Builder")
+
+    if not ACCESS_TOKEN:
+
+        st.error(
+            "UPSTOX_ACCESS_TOKEN is missing."
+        )
+
+        st.stop()
+
+    st.write(
+        "Access token loaded:",
+        bool(ACCESS_TOKEN)
+    )
+
+    # DO NOT print the actual token
+
+    future_key = find_nearest_nifty_future()
+
+    st.success(
+        f"NIFTY FUTURE FOUND: {future_key}"
+    )
+
 def find_nearest_nifty_future():
 
     url = "https://api.upstox.com/v2/instruments/search"
@@ -240,26 +265,73 @@ def find_nearest_nifty_future():
         "segments": "FO",
         "instrument_types": "FUT",
         "page_number": 1,
-        "records": 30
+        "records": 30,
     }
 
-    print("\nSearching NIFTY futures...")
-    print("URL:", url)
-    print("Params:", params)
+    try:
 
-    response = upstox_get(
-        url,
-        params=params
-    )
-
-    instruments = response.get("data", [])
-
-    if not instruments:
-        raise RuntimeError(
-            "Upstox returned no NIFTY futures."
+        response = requests.get(
+            url,
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {ACCESS_TOKEN}",
+            },
+            params=params,
+            timeout=20,
         )
 
-    rows = []
+    except Exception as e:
+
+        raise RuntimeError(
+            f"Could not connect to Upstox: {e}"
+        )
+
+    # ----------------------------------------------------------
+    # IMPORTANT
+    # Show status, but NEVER show access token
+    # ----------------------------------------------------------
+
+    status = response.status_code
+
+    try:
+        body = response.json()
+    except Exception:
+        body = response.text[:2000]
+
+    print("======================================")
+    print("UPSTOX INSTRUMENT SEARCH")
+    print("HTTP STATUS:", status)
+    print("RESPONSE:", body)
+    print("======================================")
+
+    if status != 200:
+
+        raise RuntimeError(
+            f"Upstox Instrument Search failed. "
+            f"HTTP {status}. "
+            f"Response: {body}"
+        )
+
+    if body.get("status") != "success":
+
+        raise RuntimeError(
+            f"Upstox returned unsuccessful response: {body}"
+        )
+
+    instruments = body.get("data", [])
+
+    if not instruments:
+
+        raise RuntimeError(
+            "Upstox returned zero NIFTY futures."
+        )
+
+    # ----------------------------------------------------------
+    # FILTER NIFTY FUTURES
+    # ----------------------------------------------------------
+
+    futures = []
 
     today = pd.Timestamp(
         datetime.now().date()
@@ -267,33 +339,21 @@ def find_nearest_nifty_future():
 
     for item in instruments:
 
-        underlying_symbol = str(
+        if str(
+            item.get("instrument_type", "")
+        ).upper() != "FUT":
+            continue
+
+        if str(
+            item.get("segment", "")
+        ).upper() != "NSE_FO":
+            continue
+
+        underlying = str(
             item.get("underlying_symbol", "")
         ).upper()
 
-        trading_symbol = str(
-            item.get("trading_symbol", "")
-        ).upper()
-
-        instrument_type = str(
-            item.get("instrument_type", "")
-        ).upper()
-
-        segment = str(
-            item.get("segment", "")
-        ).upper()
-
-        # --------------------------------------------------------
-        # Make absolutely sure this is NIFTY FUTURES
-        # --------------------------------------------------------
-
-        if "NIFTY" not in underlying_symbol:
-            continue
-
-        if instrument_type != "FUT":
-            continue
-
-        if segment != "NSE_FO":
+        if underlying != "NIFTY":
             continue
 
         expiry = item.get("expiry")
@@ -301,101 +361,61 @@ def find_nearest_nifty_future():
         if not expiry:
             continue
 
-        try:
-
-            expiry_date = pd.Timestamp(
-                expiry
-            )
-
-        except Exception:
-
-            continue
-
-        # --------------------------------------------------------
-        # Ignore expired contracts
-        # --------------------------------------------------------
+        expiry_date = pd.Timestamp(expiry)
 
         if expiry_date.date() < today.date():
             continue
 
-        rows.append({
-
+        futures.append({
             "instrument_key":
                 item.get("instrument_key"),
 
             "trading_symbol":
-                trading_symbol,
+                item.get("trading_symbol"),
 
             "expiry":
                 expiry_date,
 
-            "underlying_symbol":
-                underlying_symbol,
-
             "lot_size":
-                item.get("lot_size")
+                item.get("lot_size"),
 
+            "underlying_symbol":
+                item.get("underlying_symbol"),
         })
 
-    if not rows:
+    if not futures:
 
         raise RuntimeError(
-            "NIFTY futures were not found in Upstox response."
+            "Upstox responded successfully, "
+            "but no active NIFTY FUT contract was found."
         )
 
-    futures = pd.DataFrame(rows)
+    futures_df = pd.DataFrame(futures)
 
-    # ------------------------------------------------------------
-    # Nearest expiry first
-    # ------------------------------------------------------------
-
-    futures = futures.sort_values(
+    futures_df = futures_df.sort_values(
         "expiry"
     ).reset_index(drop=True)
 
     print("\nAVAILABLE NIFTY FUTURES")
-    print("=" * 80)
+    print(futures_df.to_string(index=False))
 
+    selected = futures_df.iloc[0]
+
+    print("\nSELECTED CONTRACT")
+    print("-------------------------------")
     print(
-        futures.to_string(
-            index=False
-        )
-    )
-
-    print("=" * 80)
-
-    # ------------------------------------------------------------
-    # Select nearest expiry
-    # ------------------------------------------------------------
-
-    selected = futures.iloc[0]
-
-    print("\nSELECTED NIFTY FUTURE")
-    print("-" * 60)
-
-    print(
-        "Trading Symbol :",
+        "Symbol:",
         selected["trading_symbol"]
     )
-
     print(
-        "Expiry         :",
-        selected["expiry"].strftime(
-            "%Y-%m-%d"
-        )
+        "Expiry:",
+        selected["expiry"].date()
     )
-
     print(
-        "Instrument Key :",
+        "Key:",
         selected["instrument_key"]
     )
-
-    print(
-        "Lot Size       :",
-        selected["lot_size"]
-    )
-
-    print("-" * 60)
+    print("-------------------------------")
 
     return selected["instrument_key"]
 
