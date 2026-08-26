@@ -13,7 +13,6 @@ import streamlit as st
 st.set_page_config(page_title="NIFTY 50 Position Builder", layout="wide")
 st.title("📈 NIFTY 50 - 3 Minute Position Builder")
 
-# Your Access Token pre-populated
 DEFAULT_TOKEN = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI6M0FZSEUiLCJqdGkiOiI6YThkNTc1Y2Y4MTJmNjA0MzcxZDNlM2MiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc4NzY0NzgzNiwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzg3Njk1MjAwfQ.Z4zP9w3MecFeZEcX5sUt4YdhxS6skp25fbKOv8-_gPU"
 
 access_token_input = st.text_input(
@@ -33,10 +32,9 @@ HISTOGRAM_SCALE = 1000
 # API HELPERS
 # ================================================================
 def get_headers(token):
-    clean_token = token.strip()
     return {
         "Accept": "application/json",
-        "Authorization": f"Bearer {clean_token}",
+        "Authorization": f"Bearer {token.strip()}",
     }
 
 
@@ -79,17 +77,16 @@ def get_nifty_index_intraday(token):
 
 
 def find_nearest_nifty_future(token):
-    # Retrieve active contracts for Nifty 50 index
-    url = "https://api.upstox.com/v2/option/contract"
-    params = {"instrument_key": NIFTY_INDEX_KEY}
-
     today = pd.Timestamp(datetime.now().date())
-    valid_futures = []
-
+    
+    # Method 1: Option Contract Chain Endpoint
     try:
+        url = "https://api.upstox.com/v2/option/contract"
+        params = {"instrument_key": NIFTY_INDEX_KEY}
         res = upstox_get(url, token, params=params)
         contracts = res.get("data", [])
 
+        valid_futures = []
         for item in contracts:
             if item.get("instrument_type") == "FUT":
                 expiry = item.get("expiry")
@@ -103,42 +100,36 @@ def find_nearest_nifty_future(token):
                                 "expiry": exp_dt,
                             }
                         )
+        if valid_futures:
+            futures_df = pd.DataFrame(valid_futures).sort_values("expiry")
+            return futures_df.iloc[0]["key"], futures_df.iloc[0]["symbol"]
     except Exception:
         pass
 
-    # Secondary Search fallback
-    if not valid_futures:
+    # Method 2: Dynamic Month & Year Key Construction (Robust Fallback)
+    now = datetime.now()
+    month_str = now.strftime("%b").upper()
+    year_str = now.strftime("%y")
+    
+    # Standard Upstox Futures key formats
+    candidate_keys = [
+        (f"NSE_FO|NIFTY{year_str}{month_str}FUT", f"NIFTY {month_str} FUT"),
+        (f"NSE_FO|NIFTY{year_str}AUGFUT", "NIFTY AUG FUT"),
+    ]
+
+    for key, symbol in candidate_keys:
         try:
-            search_url = "https://api.upstox.com/v2/instruments/search"
-            search_res = upstox_get(
-                search_url,
-                token,
-                params={"query": "NIFTY", "exchange": "NSE_FO"},
-            )
-            for item in search_res.get("data", []):
-                if item.get("instrument_type") == "FUT":
-                    expiry = item.get("expiry")
-                    if expiry:
-                        exp_dt = pd.Timestamp(expiry)
-                        if exp_dt.date() >= today.date():
-                            valid_futures.append(
-                                {
-                                    "key": item.get("instrument_key"),
-                                    "symbol": item.get("trading_symbol"),
-                                    "expiry": exp_dt,
-                                }
-                            )
+            encoded_key = quote(key, safe="")
+            url = f"https://api.upstox.com/v3/historical-candle/intraday/{encoded_key}/minutes/{INTERVAL}"
+            res = upstox_get(url, token)
+            if res.get("data", {}).get("candles"):
+                return key, symbol
         except Exception:
-            pass
+            continue
 
-    if not valid_futures:
-        raise RuntimeError(
-            "Could not automatically resolve an active NIFTY Future instrument key from Upstox API."
-        )
-
-    futures_df = pd.DataFrame(valid_futures).sort_values("expiry")
-    selected = futures_df.iloc[0]
-    return selected["key"], selected["symbol"]
+    raise RuntimeError(
+        "Unable to retrieve NIFTY Future instrument key. Please check your Upstox Token permissions."
+    )
 
 
 def get_nifty_future_intraday(token, future_key):
