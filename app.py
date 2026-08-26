@@ -105,7 +105,6 @@ def fetch_upstox_nifty_instruments():
         fut_key = futs.iloc[0][key_col] if not futs.empty else None
         fut_sym = futs.iloc[0][sym_col] if not futs.empty else "NIFTY FUT"
 
-        # Correct Options classification for Upstox master (OPTIDX / OPTSTK)
         opts = active_df[
             active_df[type_col].astype(str).str.upper().str.contains("OPTIDX|OPTSTK|CE|PE", regex=True)
         ]
@@ -158,31 +157,26 @@ def filter_market_hours(df):
     return df.drop(columns=["time"]).reset_index(drop=True)
 
 # ================================================================
-# POSITION BUILDER CALCULATION (TRADEFINDER MATCHED FORMULA)
+# POSITION BUILDER CALCULATION (TRADEFINDER PER-BAR DELTA)
 # ================================================================
 def calculate_tradefinder_position_builder(price_df, ce_df, pe_df):
     clean_price = price_df[["timestamp", "open", "high", "low", "close"]].copy()
 
-    # Align options timelines
     opts_merged = pd.merge(ce_df, pe_df, on="timestamp", how="inner").sort_values("timestamp")
     df = pd.merge(clean_price, opts_merged, on="timestamp", how="inner").sort_values("timestamp")
 
     if df.empty:
         raise RuntimeError("Timestamp alignment mismatch across market feeds.")
 
-    # Calculate Cumulative change from market open baseline
-    ce_base = df["ce_oi"].iloc[0]
-    pe_base = df["pe_oi"].iloc[0]
+    # Calculate 3-minute difference for Call and Put OI
+    df["ce_oi_diff"] = df["ce_oi"].diff(1).fillna(0)
+    df["pe_oi_diff"] = df["pe_oi"].diff(1).fillna(0)
 
-    df["ce_oi_delta"] = df["ce_oi"] - ce_base
-    df["pe_oi_delta"] = df["pe_oi"] - pe_base
-
-    # Net Directional OI = PE Delta - CE Delta
-    df["net_oi_change"] = df["pe_oi_delta"] - df["ce_oi_delta"]
+    # Net Directional OI Delta per bar = PE OI Change - CE OI Change
+    df["net_oi_change"] = df["pe_oi_diff"] - df["ce_oi_diff"]
     
-    # Scale for histogram rendering
-    max_abs = max(abs(df["net_oi_change"].max()), abs(df["net_oi_change"].min()), 1)
-    df["position_builder_scaled"] = (df["net_oi_change"] / max_abs) * 100
+    # Position builder value scaled for tradefinder histogram look
+    df["position_builder_scaled"] = df["net_oi_change"] / 1000
 
     return df
 
@@ -298,11 +292,10 @@ try:
             strike_col = "strike_price" if "strike_price" in opts_df.columns else "strike"
             opts_df["strike_num"] = pd.to_numeric(opts_df[strike_col], errors="coerce")
 
-            # Extract 4 closest ATM strikes (2 ITM, 2 OTM) to optimize speed and API calls
+            # Wider ATM Range (+- 300 pts, ~12 strikes) for full OI capture
             atm_strike = round(last_close / 50) * 50
-            target_strikes = [atm_strike - 100, atm_strike - 50, atm_strike, atm_strike + 50, atm_strike + 100]
-
-            atm_opts = opts_df[opts_df["strike_num"].isin(target_strikes)].copy()
+            min_stk, max_stk = atm_strike - 300, atm_strike + 300
+            atm_opts = opts_df[(opts_df["strike_num"] >= min_stk) & (opts_df["strike_num"] <= max_stk)].copy()
 
             if atm_opts.empty:
                 atm_opts = opts_df
@@ -342,7 +335,7 @@ try:
                 exp_date_str = opts_df.iloc[0]["expiry_dt"].strftime("%b-%d")
                 source_tag = f"NIFTY Weekly Options ({exp_date_str})"
             else:
-                st.error("Failed to fetch option contracts. Check API token or rates.")
+                st.error("Failed to fetch option contracts.")
                 st.stop()
         else:
             st.error("Select TradeFinder Mode to compare options Open Interest.")
