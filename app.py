@@ -160,8 +160,12 @@ def get_expiry_dates(spot_key):
             expiries = sorted(
                 list({item["expiry"] for item in data if "expiry" in item})
             )
-            if expiries:
-                return expiries
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            # Filter valid upcoming expiries
+            valid_expiries = [e for e in expiries if e >= today_str]
+            if valid_expiries:
+                return valid_expiries
+            return expiries
     except Exception:
         pass
     return [datetime.now().strftime("%Y-%m-%d")]
@@ -183,6 +187,7 @@ def fetch_strike_oi_parallel(keys, timeframe):
         df_1m = fetch_raw_1min_candles(key)
         if not df_1m.empty:
             df_res = resample_candles(df_1m, timeframe)
+            # Retain absolute OI for accurate cumulative change baseline
             df_res["oi_diff"] = df_res["oi"].diff().fillna(df_res["oi"])
             return df_res[["timestamp", "oi_diff"]]
         return pd.DataFrame()
@@ -220,7 +225,9 @@ def build_options_apex_dataset(timeframe, num_strikes, selected_expiry):
         return df_spot
 
     chain = sorted(chain, key=lambda x: x.get("strike_price", 0))
-    spot_price = df_spot["close"].iloc[-1]
+
+    # Match strike window against overall median spot price for stable structural comparisons
+    spot_price = df_spot["close"].median()
 
     closest_idx = min(
         range(len(chain)),
@@ -329,7 +336,6 @@ def render_live_chart(tf, count, expiry):
             row_heights=[0.74, 0.46],
         )
 
-        # Main Candlestick Chart (OHLC box hidden; only time displayed)
         fig.add_trace(
             go.Candlestick(
                 x=df["timestamp"],
@@ -342,13 +348,12 @@ def render_live_chart(tf, count, expiry):
                 decreasing_line_color="#f23645",
                 increasing_fillcolor="#089981",
                 decreasing_fillcolor="#f23645",
-                hovertemplate="%{x|%I:%M %p}<extra></extra>",  # Displays ONLY time
+                hovertemplate="%{x|%I:%M %p}<extra></extra>",
             ),
             row=1,
             col=1,
         )
 
-        # Lower Position Builder Histogram
         fig.add_trace(
             go.Bar(
                 x=df["timestamp"],
@@ -357,13 +362,12 @@ def render_live_chart(tf, count, expiry):
                 marker_line_width=0,
                 name="",
                 opacity=0.85,
-                hovertemplate="%{x|%I:%M %p}<extra></extra>",  # Displays ONLY time
+                hovertemplate="%{x|%I:%M %p}<extra></extra>",
             ),
             row=2,
             col=1,
         )
 
-        # Layout Config
         fig.update_layout(
             template="plotly_dark",
             paper_bgcolor="#0b0e14",
@@ -372,11 +376,10 @@ def render_live_chart(tf, count, expiry):
             height=580,
             dragmode="pan",
             xaxis_rangeslider_visible=False,
-            hovermode="x",  # Standard unified crosshair cursor hover mode
+            hovermode="x",
             showlegend=False,
         )
 
-        # Single Continuous Merged Crosshair Config (Top to Bottom)
         spike_config = dict(
             showspikes=True,
             spikemode="across",
@@ -386,7 +389,6 @@ def render_live_chart(tf, count, expiry):
             spikesnap="cursor",
         )
 
-        # Upper X-Axis
         fig.update_xaxes(
             showgrid=True,
             gridcolor="#1e222d",
@@ -397,7 +399,6 @@ def render_live_chart(tf, count, expiry):
             **spike_config,
         )
 
-        # Upper Y-Axis (Price)
         fig.update_yaxes(
             showgrid=True,
             gridcolor="#1e222d",
@@ -410,7 +411,6 @@ def render_live_chart(tf, count, expiry):
             **spike_config,
         )
 
-        # Lower X-Axis
         fig.update_xaxes(
             showgrid=True,
             gridcolor="#1e222d",
@@ -423,7 +423,6 @@ def render_live_chart(tf, count, expiry):
             **spike_config,
         )
 
-        # Lower Y-Axis Scale
         if len(df) > 2:
             scaled_max = df["pos_builder"].abs().quantile(0.98)
             if scaled_max > 0:
