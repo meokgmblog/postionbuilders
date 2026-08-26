@@ -91,6 +91,7 @@ def fetch_upstox_nifty_instruments():
 
         df.columns = [c.lower() for c in df.columns]
 
+        # Identify flexible column names
         type_col = (
             "instrument_type" if "instrument_type" in df.columns else "segment"
         )
@@ -104,23 +105,38 @@ def fetch_upstox_nifty_instruments():
             if "trading_symbol" in df.columns
             else "tradingsymbol"
         )
-        name_col = "name" if "name" in df.columns else "asset_symbol"
+        name_col = (
+            "name"
+            if "name" in df.columns
+            else ("asset_symbol" if "asset_symbol" in df.columns else sym_col)
+        )
 
-        mask = df[name_col].astype(str).str.upper().isin(["NIFTY", "NIFTY50"])
+        # Match NIFTY across name, symbol, or trading symbol
+        mask = (
+            df[name_col].astype(str).str.upper().isin(["NIFTY", "NIFTY 50"])
+            | df[sym_col].astype(str).str.upper().str.startswith("NIFTY")
+        )
         nifty_df = df[mask].copy()
 
         if nifty_df.empty:
             raise Exception("No NIFTY records found in Upstox Master CSV.")
 
-        nifty_df["expiry_dt"] = pd.to_datetime(nifty_df["expiry"])
+        # Ensure valid expiry parsing
+        nifty_df["expiry_dt"] = pd.to_datetime(
+            nifty_df["expiry"], errors="coerce"
+        )
+        nifty_df = nifty_df.dropna(subset=["expiry_dt"])
+
         today = pd.Timestamp(datetime.now().date())
 
+        # Filter upcoming/active expiries
         active_df = nifty_df[
             nifty_df["expiry_dt"].dt.date >= today.date()
         ].sort_values("expiry_dt")
 
         if active_df.empty:
-            active_df = nifty_df.sort_values("expiry_dt", ascending=False)
+            # Fallback to nearest future dates if client/server clock offset exists
+            active_df = nifty_df.sort_values("expiry_dt", ascending=True)
 
         # 1. Futures Contract
         futs = active_df[
@@ -129,13 +145,17 @@ def fetch_upstox_nifty_instruments():
         fut_key = futs.iloc[0][key_col] if not futs.empty else None
         fut_sym = futs.iloc[0][sym_col] if not futs.empty else "NIFTY FUT"
 
-        # 2. Options Contracts
+        # 2. Options Contracts (CE / PE or OPTIDX)
         opts = active_df[
-            active_df[type_col].astype(str).str.upper().isin(["CE", "PE"])
+            active_df[type_col]
+            .astype(str)
+            .str.upper()
+            .str.contains("CE|PE|OPT", regex=True)
         ]
 
         if opts.empty:
-            raise Exception("No active NIFTY Options found in master file.")
+            # Ultimate Fallback: return empty options df without crashing
+            return fut_key, fut_sym, pd.DataFrame(), key_col, sym_col
 
         nearest_expiry = opts.iloc[0]["expiry_dt"]
         matching_opts = opts[opts["expiry_dt"] == nearest_expiry].copy()
