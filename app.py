@@ -17,7 +17,7 @@ st.title("📈 NIFTY 50 - 3 Minute Position Builder")
 access_token_input = st.text_input(
     "Upstox Access Token",
     type="password",
-    help="Enter your active Upstox Bearer Access Token",
+    help="eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI6M0FZSEUiLCJqdGkiOiI2YThkNTc1Y2Y4MTJmNjA0MzcxZDNlM2MiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc4NzY0NzgzNiwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzg3Njk1MjAwfQ.Z4zP9w3MecFeZEcX5sUt4YdhxS6skp25fbKOv8-_gPU",
 )
 
 NIFTY_INDEX_KEY = "NSE_INDEX|Nifty 50"
