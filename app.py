@@ -255,10 +255,10 @@ def render_chart(df, source_label):
         cols=1,
         shared_xaxes=True,
         vertical_spacing=0.04,
-        row_heights=[0.7, 0.3],
+        row_heights=[0.9, 0.5],
         subplot_titles=(
             f"NIFTY 50 | 3m | Last: {last_price:.2f} | Updated: {last_time} IST",
-            "POSITION BUILDER HISTOGRAM",
+            "POSITION BUILDER",
         ),
     )
 
