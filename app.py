@@ -1,5 +1,6 @@
 import gzip
 import io
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from urllib.parse import quote
@@ -28,7 +29,7 @@ IST = ZoneInfo("Asia/Kolkata")
 
 
 # ================================================================
-# API HELPERS (PARALLELIZED & SPEED OPTIMIZED)
+# API HELPERS (OPTIMIZED & FAST)
 # ================================================================
 def get_headers(token):
     return {
@@ -196,7 +197,6 @@ def get_derivative_intraday(token, instrument_key):
         return pd.DataFrame()
 
 
-# Parallel Fast Fetching Helper for Options Data
 def fetch_option_data_parallel(token, option_rows, key_col):
     keys = [row[key_col] for _, row in option_rows.iterrows()]
 
@@ -269,7 +269,7 @@ def calculate_tradefinder_position_builder(price_df, ce_df, pe_df):
 
 
 # ================================================================
-# STREAMLIT CHART RENDERING (REDESIGNED CANDLESTICKS)
+# STREAMLIT CHART RENDERING (UNIFIED CROSSHAIR)
 # ================================================================
 def render_chart(df, source_label):
     last_price = df["close"].iloc[-1]
@@ -287,7 +287,7 @@ def render_chart(df, source_label):
         ),
     )
 
-    # 1. Enhanced TradingView-Style Candlestick Design
+    # 1. Candlesticks Trace
     fig.add_trace(
         go.Candlestick(
             x=df["timestamp"],
@@ -295,20 +295,19 @@ def render_chart(df, source_label):
             high=df["high"],
             low=df["low"],
             close=df["close"],
-            name="NIFTY 50",
-            # Vibrant modern green & neon red scheme
+            name="NIFTY",
             increasing_fillcolor="#089981",
             increasing_line_color="#089981",
             decreasing_fillcolor="#f23645",
             decreasing_line_color="#f23645",
-            whiskerwidth=0.4,  # Crisp, thin wicks
+            whiskerwidth=0.4,
             hoverinfo="x+name",
         ),
         row=1,
         col=1,
     )
 
-    # 2. Position Builder Bar Chart
+    # 2. Position Builder Histogram
     values = df["position_builder_scaled"].fillna(0)
     colors = ["#089981" if v >= 0 else "#f23645" for v in values]
 
@@ -319,22 +318,35 @@ def render_chart(df, source_label):
             name="Net OI Scaled",
             marker_color=colors,
             marker_line_width=0,
-            hovertemplate="Time: %{x}<br>OI Scaled: %{y:.2f}<extra></extra>",
+            hovertemplate="OI Scaled: %{y:.2f}<extra></extra>",
         ),
         row=2,
         col=1,
     )
 
+    # UNIFIED CROSSHAIR CONFIGURATION
     fig.update_layout(
         template="plotly_dark",
-        paper_bgcolor="#131722",  # Native dark background
+        paper_bgcolor="#131722",
         plot_bgcolor="#131722",
         height=720,
         margin=dict(l=15, r=15, t=35, b=15),
         showlegend=False,
-        hovermode="x",
+        hovermode="x unified",  # Creates a single crosshair top-to-bottom across both subplots
         dragmode="pan",
         xaxis_rangeslider_visible=False,
+    )
+
+    # Customize crosshair line styling
+    fig.update_xaxes(
+        showspikes=True,
+        spikemode="across",
+        spikesnap="cursor",
+        spikecolor="#89929e",
+        spikethickness=1,
+        spikedash="dash",
+        gridcolor="#2a2e39",
+        rangebreaks=[dict(bounds=["sat", "mon"])],
     )
 
     fig.update_yaxes(gridcolor="#2a2e39", zerolinecolor="#363a45", row=1, col=1)
@@ -344,9 +356,6 @@ def render_chart(df, source_label):
         zerolinecolor="#363a45",
         row=2,
         col=1,
-    )
-    fig.update_xaxes(
-        gridcolor="#2a2e39", rangebreaks=[dict(bounds=["sat", "mon"])]
     )
 
     config = {
@@ -360,7 +369,7 @@ def render_chart(df, source_label):
 
 
 # ================================================================
-# MAIN EXECUTION & SILENT BACKGROUND AUTO-UPDATE
+# MAIN EXECUTION
 # ================================================================
 data_source_mode = st.radio(
     "Select OI Source (TradeFinder uses Current Expiry Weekly Options):",
@@ -396,7 +405,6 @@ try:
         ce_opts = atm_opts[atm_opts[sym_col].astype(str).str.endswith("CE")]
         pe_opts = atm_opts[atm_opts[sym_col].astype(str).str.endswith("PE")]
 
-        # Multi-threaded parallel fetching for maximum speed
         ce_df = fetch_option_data_parallel(ACCESS_TOKEN, ce_opts, key_col)
         pe_df = fetch_option_data_parallel(ACCESS_TOKEN, pe_opts, key_col)
 
@@ -431,13 +439,18 @@ try:
 except Exception as err:
     st.error(f"Execution Error: {str(err)}")
 
-# Invisible JavaScript snippet that refreshes data silently every 3 minutes (180,000ms) without page flash
+# Calculate seconds remaining until the exact close of the current 3-minute candle (+2s API delay buffer)
+now = datetime.now()
+seconds_past_3m = (now.minute % 3) * 60 + now.second
+ms_until_candle_close = max((180 - seconds_past_3m + 2) * 1000, 3000)
+
+# Silent client-side trigger synced to candle completion
 components.html(
-    """
+    f"""
     <script>
-        setTimeout(function() {
-            window.parent.postMessage({type: 'streamlit:render'}, '*');
-        }, 180000);
+        setTimeout(function() {{
+            window.parent.postMessage({{type: 'streamlit:render'}}, '*');
+        }}, {ms_until_candle_close});
     </script>
     """,
     height=0,
