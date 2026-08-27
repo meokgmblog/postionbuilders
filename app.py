@@ -243,26 +243,26 @@ def calculate_tradefinder_position_builder(price_df, ce_df, pe_df):
 
 
 # ================================================================
-# STREAMLIT CHART RENDERING (PLOTLY INTERACTIVE)
+# STREAMLIT CHART RENDERING (PLOTLY INTERACTIVE - CUSTOMIZED)
 # ================================================================
 def render_chart(df, source_label):
     last_price = df["close"].iloc[-1]
     last_time = df["timestamp"].iloc[-1].strftime("%H:%M:%S")
 
-    # Create Subplots: Row 1 = Candlestick (Price), Row 2 = Bar Chart (Position Builder)
+    # Adjusted row height ratio to enlarge Position Builder (70% top, 30% bottom)
     fig = make_subplots(
         rows=2,
         cols=1,
         shared_xaxes=True,
-        vertical_spacing=0.03,
-        row_heights=[0.8, 0.2],
+        vertical_spacing=0.04,
+        row_heights=[0.7, 0.3],
         subplot_titles=(
             f"NIFTY 50 | 3m | Last: {last_price:.2f} | Updated: {last_time} IST",
             "POSITION BUILDER HISTOGRAM",
         ),
     )
 
-    # 1. Candlestick Chart
+    # 1. Candlestick Chart (Hover info restricted to hide OHLC text)
     fig.add_trace(
         go.Candlestick(
             x=df["timestamp"],
@@ -273,6 +273,7 @@ def render_chart(df, source_label):
             name="NIFTY 50",
             increasing_line_color="#19b5a5",
             decreasing_line_color="#ff4d5a",
+            hoverinfo="x+name",  # Hides Open, High, Low, Close numbers on hover/top bar
         ),
         row=1,
         col=1,
@@ -289,27 +290,27 @@ def render_chart(df, source_label):
             name="Net OI Scaled",
             marker_color=colors,
             marker_line_width=0,
+            hovertemplate="Time: %{x}<br>OI Scaled: %{y:.2f}<extra></extra>",
         ),
         row=2,
         col=1,
     )
 
-    # Styling for Dark Mode & TradingView Feel
+    # Dark Mode Styling, Pan Mode Default, and Zoom Configuration
     fig.update_layout(
         template="plotly_dark",
         paper_bgcolor="#0c1117",
         plot_bgcolor="#0c1117",
-        height=650,
+        height=700,
         margin=dict(l=20, r=20, t=40, b=20),
         showlegend=False,
-        hovermode="x unified",
+        hovermode="x",
+        dragmode="pan",  # Sets PAN mode as default instead of box zoom
         xaxis_rangeslider_visible=False,
     )
 
-    # Align Y-Axis Limits & Grids
-    fig.update_yaxes(
-        gridcolor="#1e2631", zerolinecolor="#30343b", row=1, col=1
-    )
+    # Configure Smooth Axis Grids & Bounds
+    fig.update_yaxes(gridcolor="#1e2631", zerolinecolor="#30343b", row=1, col=1)
     fig.update_yaxes(
         range=[-110, 110],
         gridcolor="#1e2631",
@@ -321,8 +322,15 @@ def render_chart(df, source_label):
         gridcolor="#1e2631", rangebreaks=[dict(bounds=["sat", "mon"])]
     )
 
-    # Display in Streamlit with dynamic reactivity
-    st.plotly_chart(fig, use_container_width=True)
+    # Streamlit Config: Enables smooth mouse-scroll zooming while defaulting to Pan tool
+    config = {
+        "scrollZoom": True,
+        "displayModeBar": True,
+        "modeBarButtonsToAdd": ["pan2d"],
+        "displaylogo": False,
+    }
+
+    st.plotly_chart(fig, use_container_width=True, config=config)
 
 
 # ================================================================
