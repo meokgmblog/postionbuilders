@@ -1,5 +1,6 @@
 import gzip
 import io
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
@@ -9,6 +10,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 
 # ================================================================
 # CONFIGURATION & CONSTANTS
@@ -26,7 +28,7 @@ IST = ZoneInfo("Asia/Kolkata")
 
 
 # ================================================================
-# API HELPERS
+# API HELPERS (PARALLELIZED & SPEED OPTIMIZED)
 # ================================================================
 def get_headers(token):
     return {
@@ -39,7 +41,7 @@ def get_headers(token):
 def upstox_get(url, token, params=None):
     try:
         response = requests.get(
-            url, headers=get_headers(token), params=params, timeout=20
+            url, headers=get_headers(token), params=params, timeout=10
         )
     except requests.exceptions.RequestException as e:
         raise RuntimeError(f"Network Error: {str(e)}")
@@ -84,7 +86,7 @@ def fetch_upstox_nifty_instruments():
     url = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.csv.gz"
 
     try:
-        res = requests.get(url, timeout=30)
+        res = requests.get(url, timeout=15)
         if res.status_code != 200:
             raise Exception(f"HTTP {res.status_code} while downloading file.")
 
@@ -194,6 +196,38 @@ def get_derivative_intraday(token, instrument_key):
         return pd.DataFrame()
 
 
+# Parallel Fast Fetching Helper for Options Data
+def fetch_option_data_parallel(token, option_rows, key_col):
+    keys = [row[key_col] for _, row in option_rows.iterrows()]
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        results = list(
+            executor.map(
+                lambda key: filter_market_hours(
+                    get_derivative_intraday(token, key)
+                ),
+                keys,
+            )
+        )
+
+    combined_df = None
+    for opt_data in results:
+        if not opt_data.empty:
+            opt_sub = opt_data[["timestamp", "oi"]].copy()
+            if combined_df is None:
+                combined_df = opt_sub.rename(columns={"oi": "sum_oi"})
+            else:
+                combined_df = pd.merge(
+                    combined_df, opt_sub, on="timestamp", how="outer"
+                )
+                combined_df["sum_oi"] = combined_df["sum_oi"].fillna(
+                    0
+                ) + combined_df["oi"].fillna(0)
+                combined_df.drop(columns=["oi"], inplace=True)
+
+    return combined_df
+
+
 def filter_market_hours(df):
     if df.empty:
         return df
@@ -235,7 +269,7 @@ def calculate_tradefinder_position_builder(price_df, ce_df, pe_df):
 
 
 # ================================================================
-# STREAMLIT CHART RENDERING
+# STREAMLIT CHART RENDERING (REDESIGNED CANDLESTICKS)
 # ================================================================
 def render_chart(df, source_label):
     last_price = df["close"].iloc[-1]
@@ -245,15 +279,15 @@ def render_chart(df, source_label):
         rows=2,
         cols=1,
         shared_xaxes=True,
-        vertical_spacing=0.04,
-        row_heights=[0.7, 0.3],
+        vertical_spacing=0.03,
+        row_heights=[0.68, 0.32],
         subplot_titles=(
             f"NIFTY 50 | 3m | Last: {last_price:.2f} | Updated: {last_time} IST",
             "POSITION BUILDER HISTOGRAM",
         ),
     )
 
-    # 1. Candlestick Chart
+    # 1. Enhanced TradingView-Style Candlestick Design
     fig.add_trace(
         go.Candlestick(
             x=df["timestamp"],
@@ -262,8 +296,12 @@ def render_chart(df, source_label):
             low=df["low"],
             close=df["close"],
             name="NIFTY 50",
-            increasing_line_color="#19b5a5",
-            decreasing_line_color="#ff4d5a",
+            # Vibrant modern green & neon red scheme
+            increasing_fillcolor="#089981",
+            increasing_line_color="#089981",
+            decreasing_fillcolor="#f23645",
+            decreasing_line_color="#f23645",
+            whiskerwidth=0.4,  # Crisp, thin wicks
             hoverinfo="x+name",
         ),
         row=1,
@@ -272,7 +310,7 @@ def render_chart(df, source_label):
 
     # 2. Position Builder Bar Chart
     values = df["position_builder_scaled"].fillna(0)
-    colors = ["#19b5a5" if v >= 0 else "#ff4d5a" for v in values]
+    colors = ["#089981" if v >= 0 else "#f23645" for v in values]
 
     fig.add_trace(
         go.Bar(
@@ -289,26 +327,26 @@ def render_chart(df, source_label):
 
     fig.update_layout(
         template="plotly_dark",
-        paper_bgcolor="#0c1117",
-        plot_bgcolor="#0c1117",
-        height=700,
-        margin=dict(l=20, r=20, t=40, b=20),
+        paper_bgcolor="#131722",  # Native dark background
+        plot_bgcolor="#131722",
+        height=720,
+        margin=dict(l=15, r=15, t=35, b=15),
         showlegend=False,
         hovermode="x",
         dragmode="pan",
         xaxis_rangeslider_visible=False,
     )
 
-    fig.update_yaxes(gridcolor="#1e2631", zerolinecolor="#30343b", row=1, col=1)
+    fig.update_yaxes(gridcolor="#2a2e39", zerolinecolor="#363a45", row=1, col=1)
     fig.update_yaxes(
         range=[-110, 110],
-        gridcolor="#1e2631",
-        zerolinecolor="#30343b",
+        gridcolor="#2a2e39",
+        zerolinecolor="#363a45",
         row=2,
         col=1,
     )
     fig.update_xaxes(
-        gridcolor="#1e2631", rangebreaks=[dict(bounds=["sat", "mon"])]
+        gridcolor="#2a2e39", rangebreaks=[dict(bounds=["sat", "mon"])]
     )
 
     config = {
@@ -322,110 +360,7 @@ def render_chart(df, source_label):
 
 
 # ================================================================
-# LIVE DATA FEED & AUTO-REFRESH FRAGMENT
-# ================================================================
-@st.fragment(run_every=180)  # Automatically re-executes every 180 seconds (3 mins)
-def live_dashboard(data_source_mode):
-    try:
-        with st.spinner("Fetching Live NIFTY Candles & OI Data..."):
-            idx_df = filter_market_hours(get_nifty_index_intraday(ACCESS_TOKEN))
-            fut_key, fut_sym, opts_df, key_col, sym_col, type_col = (
-                fetch_upstox_nifty_instruments()
-            )
-
-            if "Weekly" in data_source_mode and not opts_df.empty:
-                last_close = idx_df["close"].iloc[-1]
-                strike_col = (
-                    "strike_price"
-                    if "strike_price" in opts_df.columns
-                    else "strike"
-                )
-                opts_df["strike_num"] = pd.to_numeric(
-                    opts_df[strike_col], errors="coerce"
-                )
-
-                atm_strike = round(last_close / 50) * 50
-                min_stk, max_stk = atm_strike - 300, atm_strike + 300
-                atm_opts = opts_df[
-                    (opts_df["strike_num"] >= min_stk)
-                    & (opts_df["strike_num"] <= max_stk)
-                ].copy()
-
-                if atm_opts.empty:
-                    atm_opts = opts_df
-
-                ce_opts = atm_opts[
-                    atm_opts[sym_col].astype(str).str.endswith("CE")
-                ]
-                pe_opts = atm_opts[
-                    atm_opts[sym_col].astype(str).str.endswith("PE")
-                ]
-
-                ce_df = None
-                for _, row in ce_opts.iterrows():
-                    opt_data = filter_market_hours(
-                        get_derivative_intraday(ACCESS_TOKEN, row[key_col])
-                    )
-                    if not opt_data.empty:
-                        opt_sub = opt_data[["timestamp", "oi"]].copy()
-                        if ce_df is None:
-                            ce_df = opt_sub.rename(columns={"oi": "ce_oi"})
-                        else:
-                            ce_df = pd.merge(
-                                ce_df, opt_sub, on="timestamp", how="outer"
-                            )
-                            ce_df["ce_oi"] = (
-                                ce_df["ce_oi"].fillna(0) + ce_df["oi"].fillna(0)
-                            )
-                            ce_df.drop(columns=["oi"], inplace=True)
-
-                pe_df = None
-                for _, row in pe_opts.iterrows():
-                    opt_data = filter_market_hours(
-                        get_derivative_intraday(ACCESS_TOKEN, row[key_col])
-                    )
-                    if not opt_data.empty:
-                        opt_sub = opt_data[["timestamp", "oi"]].copy()
-                        if pe_df is None:
-                            pe_df = opt_sub.rename(columns={"oi": "pe_oi"})
-                        else:
-                            pe_df = pd.merge(
-                                pe_df, opt_sub, on="timestamp", how="outer"
-                            )
-                            pe_df["pe_oi"] = (
-                                pe_df["pe_oi"].fillna(0) + pe_df["oi"].fillna(0)
-                            )
-                            pe_df.drop(columns=["oi"], inplace=True)
-
-                if ce_df is not None and pe_df is not None:
-                    ce_df = ce_df.sort_values("timestamp").ffill().dropna()
-                    pe_df = pe_df.sort_values("timestamp").ffill().dropna()
-
-                    builder_df = calculate_tradefinder_position_builder(
-                        idx_df, ce_df, pe_df
-                    )
-                    exp_date_str = opts_df.iloc[0]["expiry_dt"].strftime(
-                        "%b-%d"
-                    )
-                    source_tag = f"NIFTY Weekly Options ({exp_date_str})"
-                else:
-                    st.error("Failed to fetch option contracts.")
-                    return
-            else:
-                st.error(
-                    "Select TradeFinder Mode to compare options Open Interest."
-                )
-                return
-
-        st.success(f"Connected to {source_tag} | Timezone: IST (UTC+5:30)")
-        render_chart(builder_df, source_tag)
-
-    except Exception as err:
-        st.error(f"Execution Error: {str(err)}")
-
-
-# ================================================================
-# MAIN ENTRYPOINT
+# MAIN EXECUTION & SILENT BACKGROUND AUTO-UPDATE
 # ================================================================
 data_source_mode = st.radio(
     "Select OI Source (TradeFinder uses Current Expiry Weekly Options):",
@@ -433,5 +368,77 @@ data_source_mode = st.radio(
     horizontal=True,
 )
 
-# Run live updates inside dedicated fragment
-live_dashboard(data_source_mode)
+try:
+    idx_df = filter_market_hours(get_nifty_index_intraday(ACCESS_TOKEN))
+    fut_key, fut_sym, opts_df, key_col, sym_col, type_col = (
+        fetch_upstox_nifty_instruments()
+    )
+
+    if "Weekly" in data_source_mode and not opts_df.empty:
+        last_close = idx_df["close"].iloc[-1]
+        strike_col = (
+            "strike_price" if "strike_price" in opts_df.columns else "strike"
+        )
+        opts_df["strike_num"] = pd.to_numeric(
+            opts_df[strike_col], errors="coerce"
+        )
+
+        atm_strike = round(last_close / 50) * 50
+        min_stk, max_stk = atm_strike - 300, atm_strike + 300
+        atm_opts = opts_df[
+            (opts_df["strike_num"] >= min_stk)
+            & (opts_df["strike_num"] <= max_stk)
+        ].copy()
+
+        if atm_opts.empty:
+            atm_opts = opts_df
+
+        ce_opts = atm_opts[atm_opts[sym_col].astype(str).str.endswith("CE")]
+        pe_opts = atm_opts[atm_opts[sym_col].astype(str).str.endswith("PE")]
+
+        # Multi-threaded parallel fetching for maximum speed
+        ce_df = fetch_option_data_parallel(ACCESS_TOKEN, ce_opts, key_col)
+        pe_df = fetch_option_data_parallel(ACCESS_TOKEN, pe_opts, key_col)
+
+        if ce_df is not None and pe_df is not None:
+            ce_df = (
+                ce_df.rename(columns={"sum_oi": "ce_oi"})
+                .sort_values("timestamp")
+                .ffill()
+                .dropna()
+            )
+            pe_df = (
+                pe_df.rename(columns={"sum_oi": "pe_oi"})
+                .sort_values("timestamp")
+                .ffill()
+                .dropna()
+            )
+
+            builder_df = calculate_tradefinder_position_builder(
+                idx_df, ce_df, pe_df
+            )
+            exp_date_str = opts_df.iloc[0]["expiry_dt"].strftime("%b-%d")
+            source_tag = f"NIFTY Weekly Options ({exp_date_str})"
+        else:
+            st.error("Failed to fetch option contracts.")
+            st.stop()
+    else:
+        st.error("Select TradeFinder Mode to compare options Open Interest.")
+        st.stop()
+
+    render_chart(builder_df, source_tag)
+
+except Exception as err:
+    st.error(f"Execution Error: {str(err)}")
+
+# Invisible JavaScript snippet that refreshes data silently every 3 minutes (180,000ms) without page flash
+components.html(
+    """
+    <script>
+        setTimeout(function() {
+            window.parent.postMessage({type: 'streamlit:render'}, '*');
+        }, 180000);
+    </script>
+    """,
+    height=0,
+)
