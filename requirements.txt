@@ -4,4 +4,3 @@ numpy
 matplotlib
 requests
 pytz
-plotly.graph_objects
