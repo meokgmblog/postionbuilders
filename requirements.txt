@@ -1,6 +1,5 @@
 streamlit
+requests
 pandas
 numpy
-matplotlib
-requests
-pytz
+plotly
