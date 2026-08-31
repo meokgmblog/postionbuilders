@@ -11,7 +11,6 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import requests
 import streamlit as st
-import streamlit.components.v1 as components
 
 # ================================================================
 # CONFIGURATION & CONSTANTS
@@ -368,6 +367,74 @@ def render_chart(df, source_label):
 
 
 # ================================================================
+# SILENT AUTO-UPDATE FRAGMENT
+# ================================================================
+@st.fragment(run_every=180)
+def live_chart_container(mode):
+    try:
+        idx_df = filter_market_hours(get_nifty_index_intraday(ACCESS_TOKEN))
+        fut_key, fut_sym, opts_df, key_col, sym_col, type_col = (
+            fetch_upstox_nifty_instruments()
+        )
+
+        if "Weekly" in mode and not opts_df.empty:
+            last_close = idx_df["close"].iloc[-1]
+            strike_col = (
+                "strike_price" if "strike_price" in opts_df.columns else "strike"
+            )
+            opts_df["strike_num"] = pd.to_numeric(
+                opts_df[strike_col], errors="coerce"
+            )
+
+            atm_strike = round(last_close / 50) * 50
+            min_stk, max_stk = atm_strike - 300, atm_strike + 300
+            atm_opts = opts_df[
+                (opts_df["strike_num"] >= min_stk)
+                & (opts_df["strike_num"] <= max_stk)
+            ].copy()
+
+            if atm_opts.empty:
+                atm_opts = opts_df
+
+            ce_opts = atm_opts[atm_opts[sym_col].astype(str).str.endswith("CE")]
+            pe_opts = atm_opts[atm_opts[sym_col].astype(str).str.endswith("PE")]
+
+            ce_df = fetch_option_data_parallel(ACCESS_TOKEN, ce_opts, key_col)
+            pe_df = fetch_option_data_parallel(ACCESS_TOKEN, pe_opts, key_col)
+
+            if ce_df is not None and pe_df is not None:
+                ce_df = (
+                    ce_df.rename(columns={"sum_oi": "ce_oi"})
+                    .sort_values("timestamp")
+                    .ffill()
+                    .dropna()
+                )
+                pe_df = (
+                    pe_df.rename(columns={"sum_oi": "pe_oi"})
+                    .sort_values("timestamp")
+                    .ffill()
+                    .dropna()
+                )
+
+                builder_df = calculate_tradefinder_position_builder(
+                    idx_df, ce_df, pe_df
+                )
+                exp_date_str = opts_df.iloc[0]["expiry_dt"].strftime("%b-%d")
+                source_tag = f"NIFTY Weekly Options ({exp_date_str})"
+            else:
+                st.error("Failed to fetch option contracts.")
+                return
+        else:
+            st.error("Select TradeFinder Mode to compare options Open Interest.")
+            return
+
+        render_chart(builder_df, source_tag)
+
+    except Exception as err:
+        st.error(f"Execution Error: {str(err)}")
+
+
+# ================================================================
 # MAIN EXECUTION
 # ================================================================
 data_source_mode = st.radio(
@@ -376,81 +443,5 @@ data_source_mode = st.radio(
     horizontal=True,
 )
 
-try:
-    idx_df = filter_market_hours(get_nifty_index_intraday(ACCESS_TOKEN))
-    fut_key, fut_sym, opts_df, key_col, sym_col, type_col = (
-        fetch_upstox_nifty_instruments()
-    )
-
-    if "Weekly" in data_source_mode and not opts_df.empty:
-        last_close = idx_df["close"].iloc[-1]
-        strike_col = (
-            "strike_price" if "strike_price" in opts_df.columns else "strike"
-        )
-        opts_df["strike_num"] = pd.to_numeric(
-            opts_df[strike_col], errors="coerce"
-        )
-
-        atm_strike = round(last_close / 50) * 50
-        min_stk, max_stk = atm_strike - 300, atm_strike + 300
-        atm_opts = opts_df[
-            (opts_df["strike_num"] >= min_stk)
-            & (opts_df["strike_num"] <= max_stk)
-        ].copy()
-
-        if atm_opts.empty:
-            atm_opts = opts_df
-
-        ce_opts = atm_opts[atm_opts[sym_col].astype(str).str.endswith("CE")]
-        pe_opts = atm_opts[atm_opts[sym_col].astype(str).str.endswith("PE")]
-
-        ce_df = fetch_option_data_parallel(ACCESS_TOKEN, ce_opts, key_col)
-        pe_df = fetch_option_data_parallel(ACCESS_TOKEN, pe_opts, key_col)
-
-        if ce_df is not None and pe_df is not None:
-            ce_df = (
-                ce_df.rename(columns={"sum_oi": "ce_oi"})
-                .sort_values("timestamp")
-                .ffill()
-                .dropna()
-            )
-            pe_df = (
-                pe_df.rename(columns={"sum_oi": "pe_oi"})
-                .sort_values("timestamp")
-                .ffill()
-                .dropna()
-            )
-
-            builder_df = calculate_tradefinder_position_builder(
-                idx_df, ce_df, pe_df
-            )
-            exp_date_str = opts_df.iloc[0]["expiry_dt"].strftime("%b-%d")
-            source_tag = f"NIFTY Weekly Options ({exp_date_str})"
-        else:
-            st.error("Failed to fetch option contracts.")
-            st.stop()
-    else:
-        st.error("Select TradeFinder Mode to compare options Open Interest.")
-        st.stop()
-
-    render_chart(builder_df, source_tag)
-
-except Exception as err:
-    st.error(f"Execution Error: {str(err)}")
-
-# Calculate seconds remaining until the exact close of the current 3-minute candle (+2s API delay buffer)
-now = datetime.now()
-seconds_past_3m = (now.minute % 3) * 60 + now.second
-ms_until_candle_close = max((180 - seconds_past_3m + 2) * 1000, 3000)
-
-# Client-side auto-reload trigger directly forcing top window reload
-components.html(
-    f"""
-    <script>
-        setTimeout(function() {{
-            window.top.location.reload();
-        }}, {ms_until_candle_close});
-    </script>
-    """,
-    height=0,
-)
+# Run the live updating chart component silently without browser page reload
+live_chart_container(data_source_mode)
