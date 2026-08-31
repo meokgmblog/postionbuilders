@@ -373,7 +373,7 @@ def render_chart(df, source_label):
 # ================================================================
 # SILENT AUTO-UPDATE VIA FRAGMENT ENGINE
 # ================================================================
-@st.fragment(run_every="10s")
+@st.fragment(run_every="180s")
 def live_chart_container(mode):
     # Calculate how many seconds into the current 3m candle we are
     now = datetime.now(IST)
