@@ -332,12 +332,11 @@ def render_chart(df, source_label):
         height=720,
         margin=dict(l=15, r=15, t=35, b=15),
         showlegend=False,
-        hovermode="x unified",  # Creates a single crosshair top-to-bottom across both subplots
+        hovermode="x unified",
         dragmode="pan",
         xaxis_rangeslider_visible=False,
     )
 
-    # Customize crosshair line styling
     fig.update_xaxes(
         showspikes=True,
         spikemode="across",
@@ -444,12 +443,12 @@ now = datetime.now()
 seconds_past_3m = (now.minute % 3) * 60 + now.second
 ms_until_candle_close = max((180 - seconds_past_3m + 2) * 1000, 3000)
 
-# Silent client-side trigger synced to candle completion
+# Client-side auto-reload trigger directly forcing top window reload
 components.html(
     f"""
     <script>
         setTimeout(function() {{
-            window.parent.postMessage({{type: 'streamlit:render'}}, '*');
+            window.top.location.reload();
         }}, {ms_until_candle_close});
     </script>
     """,
