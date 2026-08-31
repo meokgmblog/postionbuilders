@@ -11,7 +11,6 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import requests
 import streamlit as st
-import streamlit.components.v1 as components
 
 # ================================================================
 # CONFIGURATION & CONSTANTS
@@ -29,7 +28,7 @@ IST = ZoneInfo("Asia/Kolkata")
 
 
 # ================================================================
-# API HELPERS (OPTIMIZED & FAST)
+# API HELPERS
 # ================================================================
 def get_headers(token):
     return {
@@ -69,9 +68,7 @@ def get_nifty_index_intraday(token):
     candles = res.get("data", {}).get("candles", [])
 
     if not candles:
-        raise RuntimeError(
-            "No intraday candles returned for NIFTY 50 Index."
-        )
+        raise RuntimeError("No intraday candles returned for NIFTY 50 Index.")
 
     df = pd.DataFrame(
         candles,
@@ -139,9 +136,7 @@ def fetch_upstox_nifty_instruments():
             active_df[type_col].astype(str).str.upper().str.contains("FUT")
         ]
         fut_key = futs.iloc[0][key_col] if not futs.empty else None
-        fut_sym = (
-            futs.iloc[0][sym_col] if not futs.empty else "NIFTY FUT"
-        )
+        fut_sym = futs.iloc[0][sym_col] if not futs.empty else "NIFTY FUT"
 
         opts = active_df[
             active_df[type_col]
@@ -272,7 +267,7 @@ def calculate_tradefinder_position_builder(price_df, ce_df, pe_df):
 
 
 # ================================================================
-# STREAMLIT CHART RENDERING (UNIFIED CROSSHAIR)
+# STREAMLIT CHART RENDERING
 # ================================================================
 def render_chart(df, source_label):
     last_price = df["close"].iloc[-1]
@@ -327,7 +322,6 @@ def render_chart(df, source_label):
         col=1,
     )
 
-    # UNIFIED CROSSHAIR CONFIGURATION
     fig.update_layout(
         template="plotly_dark",
         paper_bgcolor="#131722",
@@ -371,17 +365,25 @@ def render_chart(df, source_label):
 
 
 # ================================================================
-# CANDLE-SYNCHRONIZED FRAGMENT
+# MAIN EXECUTION & AUTOMATIC CANDLE SYNC
 # ================================================================
-@st.fragment
-def live_chart_container(mode):
+data_source_mode = st.radio(
+    "Select OI Source (TradeFinder uses Current Expiry Weekly Options):",
+    ["Current Weekly Expiry Options (TradeFinder Mode)", "Monthly Futures"],
+    horizontal=True,
+)
+
+# Container for holding the live chart element
+chart_placeholder = st.empty()
+
+with chart_placeholder.container():
     try:
         idx_df = filter_market_hours(get_nifty_index_intraday(ACCESS_TOKEN))
         fut_key, fut_sym, opts_df, key_col, sym_col, type_col = (
             fetch_upstox_nifty_instruments()
         )
 
-        if "Weekly" in mode and not opts_df.empty:
+        if "Weekly" in data_source_mode and not opts_df.empty:
             last_close = idx_df["close"].iloc[-1]
             strike_col = (
                 "strike_price" if "strike_price" in opts_df.columns else "strike"
@@ -425,51 +427,22 @@ def live_chart_container(mode):
                 )
                 exp_date_str = opts_df.iloc[0]["expiry_dt"].strftime("%b-%d")
                 source_tag = f"NIFTY Weekly Options ({exp_date_str})"
+                render_chart(builder_df, source_tag)
             else:
                 st.error("Failed to fetch option contracts.")
-                return
         else:
             st.error("Select TradeFinder Mode to compare options Open Interest.")
-            return
-
-        render_chart(builder_df, source_tag)
 
     except Exception as err:
         st.error(f"Execution Error: {str(err)}")
 
-    # Calculate exact time remaining until the next 3-minute candle closes (+3s buffer for broker processing)
-    now = datetime.now(IST)
-    seconds_past_3m = (now.minute % 3) * 60 + now.second
-    seconds_to_wait = 180 - seconds_past_3m + 3
-    ms_to_wait = int(seconds_to_wait * 1000)
+# Calculate seconds remaining to next 3-minute candle boundary (+8 seconds latency offset)
+now = datetime.now(IST)
+seconds_past_interval = (now.minute % 3) * 60 + now.second
+wait_time = 180 - seconds_past_interval + 8
 
-    # HTML timer targeting the active Streamlit session directly
-    components.html(
-        f"""
-        <script>
-            setTimeout(function() {{
-                const doc = window.parent.document;
-                const buttons = doc.querySelectorAll('button');
-                for (let btn of buttons) {{
-                    if (btn.innerText.includes('Rerun') || btn.getAttribute('aria-label') === 'Rerun') {{
-                        btn.click();
-                        break;
-                    }}
-                }}
-            }}, {ms_to_wait});
-        </script>
-        """,
-        height=0,
-    )
-
-
-# ================================================================
-# MAIN EXECUTION
-# ================================================================
-data_source_mode = st.radio(
-    "Select OI Source (TradeFinder uses Current Expiry Weekly Options):",
-    ["Current Weekly Expiry Options (TradeFinder Mode)", "Monthly Futures"],
-    horizontal=True,
-)
-
-live_chart_container(data_source_mode)
+# Displays status and waits until the exact moment of candle closing
+status_info = st.info(f"⏳ Next candle sync in {wait_time} seconds...")
+time.sleep(wait_time)
+status_info.empty()
+st.rerun()
