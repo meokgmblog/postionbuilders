@@ -11,7 +11,6 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import requests
 import streamlit as st
-import streamlit.components.v1 as components
 
 # ================================================================
 # CONFIGURATION & CONSTANTS
@@ -35,7 +34,8 @@ def get_headers(token):
     return {
         "Accept": "application/json",
         "Authorization": f"Bearer {token.strip()}",
-        "Cache-Control": "no-cache",
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+        "Pragma": "no-cache",
     }
 
 
@@ -61,7 +61,9 @@ def upstox_get(url, token, params=None):
 
 def get_nifty_index_intraday(token):
     encoded_key = quote(NIFTY_INDEX_KEY, safe="")
-    url = f"https://api.upstox.com/v3/historical-candle/intraday/{encoded_key}/minutes/{INTERVAL}"
+    # Cache buster parameter ensures fresh data on every request
+    cache_buster = int(time.time())
+    url = f"https://api.upstox.com/v3/historical-candle/intraday/{encoded_key}/minutes/{INTERVAL}?_={cache_buster}"
 
     res = upstox_get(url, token)
     candles = res.get("data", {}).get("candles", [])
@@ -165,7 +167,8 @@ def get_derivative_intraday(token, instrument_key):
         return pd.DataFrame()
 
     encoded_key = quote(str(instrument_key), safe="")
-    url = f"https://api.upstox.com/v3/historical-candle/intraday/{encoded_key}/minutes/{INTERVAL}"
+    cache_buster = int(time.time())
+    url = f"https://api.upstox.com/v3/historical-candle/intraday/{encoded_key}/minutes/{INTERVAL}?_={cache_buster}"
 
     try:
         res = upstox_get(url, token)
@@ -368,10 +371,18 @@ def render_chart(df, source_label):
 
 
 # ================================================================
-# CANDLE-SYNCHRONIZED FRAGMENT
+# SILENT AUTO-UPDATE VIA FRAGMENT ENGINE
 # ================================================================
-@st.fragment
+@st.fragment(run_every="10s")
 def live_chart_container(mode):
+    # Calculate how many seconds into the current 3m candle we are
+    now = datetime.now(IST)
+    seconds_past_3m = (now.minute % 3) * 60 + now.second
+
+    # Wait briefly if execution hits right at the close of a candle (0-5s) so Upstox updates APIs
+    if seconds_past_3m < 5:
+        time.sleep(4)
+
     try:
         idx_df = filter_market_hours(get_nifty_index_intraday(ACCESS_TOKEN))
         fut_key, fut_sym, opts_df, key_col, sym_col, type_col = (
@@ -433,24 +444,6 @@ def live_chart_container(mode):
 
     except Exception as err:
         st.error(f"Execution Error: {str(err)}")
-
-    # Compute exact time remaining until the next 3-minute candle boundary (+3s buffer for broker candle generation)
-    now = datetime.now(IST)
-    seconds_past_3m = (now.minute % 3) * 60 + now.second
-    seconds_to_wait = 180 - seconds_past_3m + 3
-    ms_to_wait = int(seconds_to_wait * 1000)
-
-    # Component trigger scoped to rerun only this fragment
-    components.html(
-        f"""
-        <script>
-            setTimeout(function() {{
-                window.parent.postMessage({{type: 'streamlit:render'}}, '*');
-            }}, {ms_to_wait});
-        </script>
-        """,
-        height=0,
-    )
 
 
 # ================================================================
