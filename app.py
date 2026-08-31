@@ -11,6 +11,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 
 # ================================================================
 # CONFIGURATION & CONSTANTS
@@ -367,9 +368,9 @@ def render_chart(df, source_label):
 
 
 # ================================================================
-# SILENT AUTO-UPDATE FRAGMENT
+# CANDLE-SYNCHRONIZED FRAGMENT
 # ================================================================
-@st.fragment(run_every=180)
+@st.fragment
 def live_chart_container(mode):
     try:
         idx_df = filter_market_hours(get_nifty_index_intraday(ACCESS_TOKEN))
@@ -433,6 +434,24 @@ def live_chart_container(mode):
     except Exception as err:
         st.error(f"Execution Error: {str(err)}")
 
+    # Compute exact time remaining until the next 3-minute candle boundary (+3s buffer for broker candle generation)
+    now = datetime.now(IST)
+    seconds_past_3m = (now.minute % 3) * 60 + now.second
+    seconds_to_wait = 180 - seconds_past_3m + 3
+    ms_to_wait = int(seconds_to_wait * 1000)
+
+    # Component trigger scoped to rerun only this fragment
+    components.html(
+        f"""
+        <script>
+            setTimeout(function() {{
+                window.parent.postMessage({{type: 'streamlit:render'}}, '*');
+            }}, {ms_to_wait});
+        </script>
+        """,
+        height=0,
+    )
+
 
 # ================================================================
 # MAIN EXECUTION
@@ -443,5 +462,4 @@ data_source_mode = st.radio(
     horizontal=True,
 )
 
-# Run the live updating chart component silently without browser page reload
 live_chart_container(data_source_mode)
