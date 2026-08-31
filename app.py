@@ -11,6 +11,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 
 # ================================================================
 # CONFIGURATION & CONSTANTS
@@ -61,7 +62,6 @@ def upstox_get(url, token, params=None):
 
 def get_nifty_index_intraday(token):
     encoded_key = quote(NIFTY_INDEX_KEY, safe="")
-    # Cache buster parameter ensures fresh data on every request
     cache_buster = int(time.time())
     url = f"https://api.upstox.com/v3/historical-candle/intraday/{encoded_key}/minutes/{INTERVAL}?_={cache_buster}"
 
@@ -371,18 +371,10 @@ def render_chart(df, source_label):
 
 
 # ================================================================
-# SILENT AUTO-UPDATE VIA FRAGMENT ENGINE
+# CANDLE-SYNCHRONIZED FRAGMENT
 # ================================================================
-@st.fragment(run_every="180s")
+@st.fragment
 def live_chart_container(mode):
-    # Calculate how many seconds into the current 3m candle we are
-    now = datetime.now(IST)
-    seconds_past_3m = (now.minute % 3) * 60 + now.second
-
-    # Wait briefly if execution hits right at the close of a candle (0-5s) so Upstox updates APIs
-    if seconds_past_3m < 5:
-        time.sleep(4)
-
     try:
         idx_df = filter_market_hours(get_nifty_index_intraday(ACCESS_TOKEN))
         fut_key, fut_sym, opts_df, key_col, sym_col, type_col = (
@@ -444,6 +436,31 @@ def live_chart_container(mode):
 
     except Exception as err:
         st.error(f"Execution Error: {str(err)}")
+
+    # Calculate exact time remaining until the next 3-minute candle closes (+3s buffer for broker processing)
+    now = datetime.now(IST)
+    seconds_past_3m = (now.minute % 3) * 60 + now.second
+    seconds_to_wait = 180 - seconds_past_3m + 3
+    ms_to_wait = int(seconds_to_wait * 1000)
+
+    # HTML timer targeting the active Streamlit session directly
+    components.html(
+        f"""
+        <script>
+            setTimeout(function() {{
+                const doc = window.parent.document;
+                const buttons = doc.querySelectorAll('button');
+                for (let btn of buttons) {{
+                    if (btn.innerText.includes('Rerun') || btn.getAttribute('aria-label') === 'Rerun') {{
+                        btn.click();
+                        break;
+                    }}
+                }}
+            }}, {ms_to_wait});
+        </script>
+        """,
+        height=0,
+    )
 
 
 # ================================================================
