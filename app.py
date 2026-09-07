@@ -84,7 +84,6 @@ def get_nifty_index_intraday(token):
     return df.sort_values("timestamp").reset_index(drop=True)
 
 
-@st.cache_data(ttl=3600)
 def fetch_upstox_nifty_instruments():
     url = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.csv.gz"
 
@@ -155,7 +154,15 @@ def fetch_upstox_nifty_instruments():
 
 
 def fetch_market_quotes_oi(token, ce_keys, pe_keys):
-    all_keys = ce_keys + pe_keys
+    # Ensure correct instrument key formatting (Upstox requires 'NSE_FO|...' format)
+    formatted_ce = [
+        k if k.startswith("NSE_FO|") else f"NSE_FO|{k}" for k in ce_keys
+    ]
+    formatted_pe = [
+        k if k.startswith("NSE_FO|") else f"NSE_FO|{k}" for k in pe_keys
+    ]
+
+    all_keys = formatted_ce + formatted_pe
     if not all_keys:
         return 0, 0
 
@@ -169,8 +176,8 @@ def fetch_market_quotes_oi(token, ce_keys, pe_keys):
         ce_total_oi = 0
         pe_total_oi = 0
 
-        ce_set = set(ce_keys)
-        pe_set = set(pe_keys)
+        ce_set = set(formatted_ce)
+        pe_set = set(formatted_pe)
 
         for key, details in data.items():
             oi_val = details.get("oi", 0) or 0
@@ -202,15 +209,15 @@ def calculate_tradefinder_position_builder(price_df, ce_oi, pe_oi):
     df = price_df[["timestamp", "open", "high", "low", "close", "volume"]].copy()
     latest_ts = df["timestamp"].iloc[-1]
 
-    # Capture live total OI snapshot into session state
-    st.session_state["oi_history"][latest_ts] = (ce_oi, pe_oi)
+    # Store snapshot if valid OI values exist
+    if ce_oi > 0 or pe_oi > 0:
+        st.session_state["oi_history"][latest_ts] = (ce_oi, pe_oi)
 
-    # Establish baseline snapshot (first stored timestamp of the day)
-    first_ts = df["timestamp"].iloc[0]
-    if first_ts in st.session_state["oi_history"]:
-        base_ce, base_pe = st.session_state["oi_history"][first_ts]
-    else:
-        base_ce, base_pe = ce_oi, pe_oi
+    # Find baseline OI
+    base_ce, base_pe = 0, 0
+    if st.session_state["oi_history"]:
+        first_key = list(st.session_state["oi_history"].keys())[0]
+        base_ce, base_pe = st.session_state["oi_history"][first_key]
 
     net_oi_list = []
 
@@ -218,23 +225,27 @@ def calculate_tradefinder_position_builder(price_df, ce_oi, pe_oi):
         ts = row["timestamp"]
         if ts in st.session_state["oi_history"]:
             c_oi, p_oi = st.session_state["oi_history"][ts]
-            # Change in OI relative to session open baseline
             delta_pe = p_oi - base_pe
             delta_ce = c_oi - base_ce
             net_change = delta_pe - delta_ce
             net_oi_list.append(net_change)
         else:
-            # Synthetic momentum estimate for historical candles before app launch
+            # Price-Volume Momentum Fallback (Guarantees visible bars for historical candles)
             direction = np.sign(row["close"] - row["open"])
-            rng = max(row["high"] - row["low"], 1.0)
+            if direction == 0:
+                direction = 1 if row["close"] >= row["open"] else -1
+            rng = max(row["high"] - row["low"], 0.25)
             body_ratio = abs(row["close"] - row["open"]) / rng
-            net_oi_list.append(direction * body_ratio * row["volume"])
+            
+            # Combine volume & candle body strength
+            val = direction * (0.5 + 0.5 * body_ratio) * max(row["volume"], 1.0)
+            net_oi_list.append(val)
 
     df["position_builder_val"] = net_oi_list
 
-    # Scale non-zero values into visual range (-100 to +100)
+    # Scale values to [-100, 100]
     max_val = max(abs(df["position_builder_val"].min()), abs(df["position_builder_val"].max()), 1.0)
-    df["position_builder_scaled"] = (df["position_builder_val"] / max_val) * 100
+    df["position_builder_scaled"] = (df["position_builder_val"] / max_val) * 90.0
 
     return df
 
@@ -286,10 +297,10 @@ def render_chart(df, source_label):
         go.Bar(
             x=df["timestamp"],
             y=values,
-            name="Net OI Change",
+            name="Position Builder",
             marker_color=colors,
             marker_line_width=0,
-            hovertemplate="Scaled OI Change: %{y:.2f}<extra></extra>",
+            hovertemplate="Score: %{y:.2f}<extra></extra>",
         ),
         row=2,
         col=1,
@@ -320,7 +331,7 @@ def render_chart(df, source_label):
 
     fig.update_yaxes(gridcolor="#2a2e39", zerolinecolor="#363a45", row=1, col=1)
     
-    # Standardized Y-axis range for histogram visibility
+    # Fixed Y-axis range for histogram
     fig.update_yaxes(
         range=[-110, 110],
         gridcolor="#2a2e39",
