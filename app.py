@@ -25,7 +25,7 @@ MARKET_START = "09:15"
 MARKET_END = "15:30"
 IST = ZoneInfo("Asia/Kolkata")
 
-# Initialize session state for persistent OI history
+# Initialize session state for persistent OI snapshot history across reruns
 if "oi_history" not in st.session_state:
     st.session_state["oi_history"] = {}
 
@@ -200,32 +200,41 @@ def filter_market_hours(df):
 # ================================================================
 def calculate_tradefinder_position_builder(price_df, ce_oi, pe_oi):
     df = price_df[["timestamp", "open", "high", "low", "close", "volume"]].copy()
-
-    # Save latest live snapshot into persistent state map
     latest_ts = df["timestamp"].iloc[-1]
+
+    # Capture live total OI snapshot into session state
     st.session_state["oi_history"][latest_ts] = (ce_oi, pe_oi)
 
-    # Synthetic fallback logic for historical candles before app launch
-    df["body"] = df["close"] - df["open"]
-    df["range"] = (df["high"] - df["low"]).replace(0, 1e-5)
-    df["direction"] = np.sign(df["body"])
+    # Establish baseline snapshot (first stored timestamp of the day)
+    first_ts = df["timestamp"].iloc[0]
+    if first_ts in st.session_state["oi_history"]:
+        base_ce, base_pe = st.session_state["oi_history"][first_ts]
+    else:
+        base_ce, base_pe = ce_oi, pe_oi
 
-    max_vol = df["volume"].max() if df["volume"].max() > 0 else 1
-    df["vol_ratio"] = df["volume"] / max_vol
+    net_oi_list = []
 
-    # Position Builder formula: combines candle momentum and volume
-    df["net_oi_change"] = df["direction"] * (abs(df["body"]) / df["range"]) * df["vol_ratio"] * 100
-
-    # Overwrite candle snapshots where state exists
     for idx, row in df.iterrows():
         ts = row["timestamp"]
         if ts in st.session_state["oi_history"]:
             c_oi, p_oi = st.session_state["oi_history"][ts]
-            df.at[idx, "net_oi_change"] = (p_oi - c_oi) / 1000.0
+            # Change in OI relative to session open baseline
+            delta_pe = p_oi - base_pe
+            delta_ce = c_oi - base_ce
+            net_change = delta_pe - delta_ce
+            net_oi_list.append(net_change)
+        else:
+            # Synthetic momentum estimate for historical candles before app launch
+            direction = np.sign(row["close"] - row["open"])
+            rng = max(row["high"] - row["low"], 1.0)
+            body_ratio = abs(row["close"] - row["open"]) / rng
+            net_oi_list.append(direction * body_ratio * row["volume"])
 
-    # Ensure min/max ranges don't collapse to 0
-    max_val = max(abs(df["net_oi_change"].min()), abs(df["net_oi_change"].max()), 1.0)
-    df["position_builder_scaled"] = (df["net_oi_change"] / max_val) * 100
+    df["position_builder_val"] = net_oi_list
+
+    # Scale non-zero values into visual range (-100 to +100)
+    max_val = max(abs(df["position_builder_val"].min()), abs(df["position_builder_val"].max()), 1.0)
+    df["position_builder_scaled"] = (df["position_builder_val"] / max_val) * 100
 
     return df
 
@@ -249,7 +258,7 @@ def render_chart(df, source_label):
         ),
     )
 
-    # 1. Candlesticks Trace
+    # 1. Candlestick Trace
     fig.add_trace(
         go.Candlestick(
             x=df["timestamp"],
@@ -277,10 +286,10 @@ def render_chart(df, source_label):
         go.Bar(
             x=df["timestamp"],
             y=values,
-            name="Net OI Scaled",
+            name="Net OI Change",
             marker_color=colors,
             marker_line_width=0,
-            hovertemplate="OI Scaled: %{y:.2f}<extra></extra>",
+            hovertemplate="Scaled OI Change: %{y:.2f}<extra></extra>",
         ),
         row=2,
         col=1,
@@ -310,9 +319,10 @@ def render_chart(df, source_label):
     )
 
     fig.update_yaxes(gridcolor="#2a2e39", zerolinecolor="#363a45", row=1, col=1)
-    # Enable dynamic autorange on row 2 so histogram bars are visible
+    
+    # Standardized Y-axis range for histogram visibility
     fig.update_yaxes(
-        autorange=True,
+        range=[-110, 110],
         gridcolor="#2a2e39",
         zerolinecolor="#363a45",
         row=2,
