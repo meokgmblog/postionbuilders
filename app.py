@@ -198,7 +198,7 @@ def get_derivative_intraday(token, instrument_key):
 def fetch_option_data_parallel(token, option_rows, key_col):
     keys = [row[key_col] for _, row in option_rows.iterrows()]
 
-    with ThreadPoolExecutor(max_workers=10) as executor:
+    with ThreadPoolExecutor(max_workers=5) as executor:
         results = list(
             executor.map(
                 lambda key: filter_market_hours(
@@ -245,15 +245,22 @@ def calculate_tradefinder_position_builder(price_df, ce_df, pe_df):
         ["timestamp", "open", "high", "low", "close"]
     ].copy()
 
-    opts_merged = pd.merge(ce_df, pe_df, on="timestamp", how="inner").sort_values(
+    # Align option streams using outer join to preserve all timestamps
+    opts_merged = pd.merge(ce_df, pe_df, on="timestamp", how="outer").sort_values(
         "timestamp"
     )
-    df = pd.merge(clean_price, opts_merged, on="timestamp", how="inner").sort_values(
+
+    # Left join to candle dataframe so missing option timestamps do not drop price rows
+    df = pd.merge(clean_price, opts_merged, on="timestamp", how="left").sort_values(
         "timestamp"
     )
 
     if df.empty:
         raise RuntimeError("Timestamp alignment mismatch across market feeds.")
+
+    # Fill missing intraday values forward before computing difference
+    df["ce_oi"] = df["ce_oi"].ffill().fillna(0)
+    df["pe_oi"] = df["pe_oi"].ffill().fillna(0)
 
     df["ce_oi_diff"] = df["ce_oi"].diff(1).fillna(0)
     df["pe_oi_diff"] = df["pe_oi"].diff(1).fillna(0)
