@@ -1,7 +1,6 @@
 import gzip
 import io
 import time
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
@@ -158,12 +157,10 @@ def fetch_upstox_nifty_instruments():
 
 
 def fetch_market_quotes_oi(token, ce_keys, pe_keys):
-    """Fetches real-time market quote Open Interest for CE and PE option keys in bulk."""
     all_keys = ce_keys + pe_keys
     if not all_keys:
         return 0, 0
 
-    # Upstox quote endpoint allows comma-separated instrument keys
     keys_param = ",".join(all_keys[:500])
     url = f"https://api.upstox.com/v2/market-quote/quotes?instrument_key={quote(keys_param, safe=',')}"
 
@@ -203,24 +200,25 @@ def filter_market_hours(df):
 # ================================================================
 # POSITION BUILDER CALCULATION
 # ================================================================
-def calculate_tradefinder_position_builder(price_df, ce_oi, pe_oi):
-    df = price_df[["timestamp", "open", "high", "low", "close"]].copy()
+def calculate_tradefinder_position_builder(price_df, ce_total_oi, pe_total_oi):
+    df = price_df[["timestamp", "open", "high", "low", "close", "volume"]].copy()
 
-    # Reconstruct intraday candle-by-candle OI using candle volume profiles
-    if "volume" in price_df.columns and price_df["volume"].sum() > 0:
-        vol_ratio = price_df["volume"].cumsum() / price_df["volume"].sum()
-    else:
-        vol_ratio = np.linspace(0.05, 1.0, len(df))
+    # Calculate per-candle directional momentum using Price-Volume delta
+    df["body"] = df["close"] - df["open"]
+    df["range"] = (df["high"] - df["low"]).replace(0, 1e-5)
+    df["direction"] = np.sign(df["body"])
 
-    df["ce_oi"] = (ce_oi * vol_ratio).astype(float)
-    df["pe_oi"] = (pe_oi * vol_ratio).astype(float)
+    # Combine price movement and volume weight to model realistic net OI shifts per 3m bar
+    df["volume_weight"] = df["volume"] / (df["volume"].mean() + 1e-5)
+    df["raw_shift"] = df["direction"] * (abs(df["body"]) / df["range"]) * df["volume_weight"]
 
-    df["ce_oi_diff"] = df["ce_oi"].diff(1).fillna(0)
-    df["pe_oi_diff"] = df["pe_oi"].diff(1).fillna(0)
+    # Scale shifts relative to live Options PCR (Put-Call Ratio) bias
+    total_oi = max(ce_total_oi + pe_total_oi, 1)
+    pcr_bias = (pe_total_oi - ce_total_oi) / total_oi
 
-    df["net_oi_change"] = df["pe_oi_diff"] - df["ce_oi_diff"]
+    df["net_oi_change"] = df["raw_shift"] + (pcr_bias * 0.15)
 
-    max_val = max(abs(df["net_oi_change"].min()), abs(df["net_oi_change"].max()), 1)
+    max_val = max(abs(df["net_oi_change"].min()), abs(df["net_oi_change"].max()), 1e-5)
     df["position_builder_scaled"] = (df["net_oi_change"] / max_val) * 100
 
     return df
