@@ -81,9 +81,10 @@ def get_nifty_index_intraday(token):
         .dt.tz_localize(None)
         .dt.floor("3min")
     )
-    return df.sort_values("timestamp").reset_index(drop=True)
+    return df.sort_values("timestamp").drop_duplicates("timestamp").reset_index(drop=True)
 
 
+@st.cache_data(ttl=3600)
 def fetch_upstox_nifty_instruments():
     url = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.csv.gz"
 
@@ -128,7 +129,7 @@ def fetch_upstox_nifty_instruments():
             nifty_df["expiry"], errors="coerce"
         )
         nifty_df = nifty_df.dropna(subset=["expiry_dt"])
-        today = pd.Timestamp(datetime.now(IST).date())
+        today = pd.Timestamp(datetime.now().date())
 
         active_df = nifty_df[
             nifty_df["expiry_dt"].dt.date >= today.date()
@@ -193,7 +194,7 @@ def get_derivative_intraday(token, instrument_key):
             .dt.tz_localize(None)
             .dt.floor("3min")
         )
-        return df.sort_values("timestamp").reset_index(drop=True)
+        return df.sort_values("timestamp").drop_duplicates("timestamp").reset_index(drop=True)
     except Exception:
         return pd.DataFrame()
 
@@ -221,9 +222,7 @@ def fetch_option_data_parallel(token, option_rows, key_col):
                 combined_df = pd.merge(
                     combined_df, opt_sub, on="timestamp", how="outer"
                 )
-                combined_df["sum_oi"] = combined_df["sum_oi"].fillna(
-                    0
-                ) + combined_df["oi"].fillna(0)
+                combined_df["sum_oi"] = combined_df["sum_oi"].fillna(0) + combined_df["oi"].fillna(0)
                 combined_df.drop(columns=["oi"], inplace=True)
 
     return combined_df
@@ -244,19 +243,22 @@ def filter_market_hours(df):
 # POSITION BUILDER CALCULATION
 # ================================================================
 def calculate_tradefinder_position_builder(price_df, ce_df, pe_df):
-    clean_price = price_df[
-        ["timestamp", "open", "high", "low", "close"]
-    ].copy()
+    clean_price = price_df[["timestamp", "open", "high", "low", "close"]].sort_values("timestamp").copy()
+    ce_df = ce_df.sort_values("timestamp").copy()
+    pe_df = pe_df.sort_values("timestamp").copy()
 
-    opts_merged = pd.merge(ce_df, pe_df, on="timestamp", how="outer").sort_values(
-        "timestamp"
+    # Dynamic As-Of Matching to prevent timestamp alignment drops
+    opts_merged = pd.merge_asof(
+        ce_df, pe_df, on="timestamp", direction="nearest", tolerance=pd.Timedelta("3min")
     )
-    df = pd.merge(clean_price, opts_merged, on="timestamp", how="left").sort_values(
-        "timestamp"
+    df = pd.merge_asof(
+        clean_price, opts_merged, on="timestamp", direction="nearest", tolerance=pd.Timedelta("3min")
     )
 
-    df["ce_oi"] = df["ce_oi"].ffill().fillna(0)
-    df["pe_oi"] = df["pe_oi"].ffill().fillna(0)
+    df = df.dropna(subset=["ce_oi", "pe_oi"]).reset_index(drop=True)
+
+    if df.empty:
+        raise RuntimeError("Timestamp alignment mismatch across market feeds.")
 
     df["ce_oi_diff"] = df["ce_oi"].diff(1).fillna(0)
     df["pe_oi_diff"] = df["pe_oi"].diff(1).fillna(0)
@@ -283,11 +285,12 @@ def render_chart(df, source_label):
         vertical_spacing=0.03,
         row_heights=[0.68, 0.32],
         subplot_titles=(
-            f"NIFTY 50 | 3m | Last: {last_price:.2f} | Updated: {last_time} IST ({source_label})",
+            f"NIFTY 50 | 3m | Last: {last_price:.2f} | Updated: {last_time} IST",
             "POSITION BUILDER HISTOGRAM",
         ),
     )
 
+    # 1. Candlesticks Trace
     fig.add_trace(
         go.Candlestick(
             x=df["timestamp"],
@@ -307,6 +310,7 @@ def render_chart(df, source_label):
         col=1,
     )
 
+    # 2. Position Builder Histogram
     values = df["position_builder_scaled"].fillna(0)
     colors = ["#089981" if v >= 0 else "#f23645" for v in values]
 
@@ -408,16 +412,18 @@ with chart_placeholder.container():
             ce_df = fetch_option_data_parallel(ACCESS_TOKEN, ce_opts, key_col)
             pe_df = fetch_option_data_parallel(ACCESS_TOKEN, pe_opts, key_col)
 
-            if ce_df is not None and pe_df is not None and not ce_df.empty and not pe_df.empty:
+            if ce_df is not None and pe_df is not None:
                 ce_df = (
                     ce_df.rename(columns={"sum_oi": "ce_oi"})
                     .sort_values("timestamp")
                     .ffill()
+                    .dropna()
                 )
                 pe_df = (
                     pe_df.rename(columns={"sum_oi": "pe_oi"})
                     .sort_values("timestamp")
                     .ffill()
+                    .dropna()
                 )
 
                 builder_df = calculate_tradefinder_position_builder(
@@ -427,7 +433,7 @@ with chart_placeholder.container():
                 source_tag = f"NIFTY Weekly Options ({exp_date_str})"
                 render_chart(builder_df, source_tag)
             else:
-                st.error("Failed to fetch option contracts or empty OI returned.")
+                st.error("Failed to fetch option contracts.")
         else:
             st.error("Select TradeFinder Mode to compare options Open Interest.")
 
