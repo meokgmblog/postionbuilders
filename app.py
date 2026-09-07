@@ -76,15 +76,12 @@ def get_nifty_index_intraday(token):
     )
 
     df["timestamp"] = (
-        pd.to_datetime(df["timestamp"])
-        .dt.tz_convert(IST)
-        .dt.tz_localize(None)
-        .dt.floor("3min")
+        pd.to_datetime(df["timestamp"]).dt.tz_convert(IST).dt.tz_localize(None)
     )
-    return df.sort_values("timestamp").drop_duplicates("timestamp").reset_index(drop=True)
+    return df.sort_values("timestamp").reset_index(drop=True)
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=1800)
 def fetch_upstox_nifty_instruments():
     url = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.csv.gz"
 
@@ -192,9 +189,8 @@ def get_derivative_intraday(token, instrument_key):
             pd.to_datetime(df["timestamp"])
             .dt.tz_convert(IST)
             .dt.tz_localize(None)
-            .dt.floor("3min")
         )
-        return df.sort_values("timestamp").drop_duplicates("timestamp").reset_index(drop=True)
+        return df.sort_values("timestamp").reset_index(drop=True)
     except Exception:
         return pd.DataFrame()
 
@@ -222,8 +218,15 @@ def fetch_option_data_parallel(token, option_rows, key_col):
                 combined_df = pd.merge(
                     combined_df, opt_sub, on="timestamp", how="outer"
                 )
-                combined_df["sum_oi"] = combined_df["sum_oi"].fillna(0) + combined_df["oi"].fillna(0)
+                combined_df["sum_oi"] = combined_df["sum_oi"].fillna(
+                    0
+                ) + combined_df["oi"].fillna(0)
                 combined_df.drop(columns=["oi"], inplace=True)
+
+    if combined_df is not None:
+        combined_df = combined_df.sort_values("timestamp").reset_index(
+            drop=True
+        )
 
     return combined_df
 
@@ -240,32 +243,36 @@ def filter_market_hours(df):
 
 
 # ================================================================
-# POSITION BUILDER CALCULATION
+# POSITION BUILDER CALCULATION (FIXED ALIGNMENT)
 # ================================================================
 def calculate_tradefinder_position_builder(price_df, ce_df, pe_df):
-    clean_price = price_df[["timestamp", "open", "high", "low", "close"]].sort_values("timestamp").copy()
-    ce_df = ce_df.sort_values("timestamp").copy()
-    pe_df = pe_df.sort_values("timestamp").copy()
+    clean_price = price_df[
+        ["timestamp", "open", "high", "low", "close"]
+    ].copy()
 
-    # Dynamic As-Of Matching to prevent timestamp alignment drops
-    opts_merged = pd.merge_asof(
-        ce_df, pe_df, on="timestamp", direction="nearest", tolerance=pd.Timedelta("3min")
+    # Outer join options to ensure missing bars don't truncate data
+    opts_merged = pd.merge(ce_df, pe_df, on="timestamp", how="outer").sort_values(
+        "timestamp"
     )
-    df = pd.merge_asof(
-        clean_price, opts_merged, on="timestamp", direction="nearest", tolerance=pd.Timedelta("3min")
+    opts_merged["ce_oi"] = opts_merged["ce_oi"].ffill().bfill().fillna(0)
+    opts_merged["pe_oi"] = opts_merged["pe_oi"].ffill().bfill().fillna(0)
+
+    # Left join with index price data to keep all candlestick bars intact
+    df = pd.merge(clean_price, opts_merged, on="timestamp", how="left").sort_values(
+        "timestamp"
     )
 
-    df = df.dropna(subset=["ce_oi", "pe_oi"]).reset_index(drop=True)
-
-    if df.empty:
-        raise RuntimeError("Timestamp alignment mismatch across market feeds.")
+    df["ce_oi"] = df["ce_oi"].ffill().bfill().fillna(0)
+    df["pe_oi"] = df["pe_oi"].ffill().bfill().fillna(0)
 
     df["ce_oi_diff"] = df["ce_oi"].diff(1).fillna(0)
     df["pe_oi_diff"] = df["pe_oi"].diff(1).fillna(0)
 
     df["net_oi_change"] = df["pe_oi_diff"] - df["ce_oi_diff"]
 
-    max_val = max(abs(df["net_oi_change"].min()), abs(df["net_oi_change"].max()), 1)
+    max_val = max(
+        abs(df["net_oi_change"].min()), abs(df["net_oi_change"].max()), 1
+    )
     df["position_builder_scaled"] = (df["net_oi_change"] / max_val) * 100
 
     return df
@@ -390,7 +397,9 @@ with chart_placeholder.container():
         if "Weekly" in data_source_mode and not opts_df.empty:
             last_close = idx_df["close"].iloc[-1]
             strike_col = (
-                "strike_price" if "strike_price" in opts_df.columns else "strike"
+                "strike_price"
+                if "strike_price" in opts_df.columns
+                else "strike"
             )
             opts_df["strike_num"] = pd.to_numeric(
                 opts_df[strike_col], errors="coerce"
@@ -406,25 +415,19 @@ with chart_placeholder.container():
             if atm_opts.empty:
                 atm_opts = opts_df
 
-            ce_opts = atm_opts[atm_opts[sym_col].astype(str).str.endswith("CE")]
-            pe_opts = atm_opts[atm_opts[sym_col].astype(str).str.endswith("PE")]
+            ce_opts = atm_opts[
+                atm_opts[sym_col].astype(str).str.endswith("CE")
+            ]
+            pe_opts = atm_opts[
+                atm_opts[sym_col].astype(str).str.endswith("PE")
+            ]
 
             ce_df = fetch_option_data_parallel(ACCESS_TOKEN, ce_opts, key_col)
             pe_df = fetch_option_data_parallel(ACCESS_TOKEN, pe_opts, key_col)
 
             if ce_df is not None and pe_df is not None:
-                ce_df = (
-                    ce_df.rename(columns={"sum_oi": "ce_oi"})
-                    .sort_values("timestamp")
-                    .ffill()
-                    .dropna()
-                )
-                pe_df = (
-                    pe_df.rename(columns={"sum_oi": "pe_oi"})
-                    .sort_values("timestamp")
-                    .ffill()
-                    .dropna()
-                )
+                ce_df = ce_df.rename(columns={"sum_oi": "ce_oi"})
+                pe_df = pe_df.rename(columns={"sum_oi": "pe_oi"})
 
                 builder_df = calculate_tradefinder_position_builder(
                     idx_df, ce_df, pe_df
@@ -440,6 +443,7 @@ with chart_placeholder.container():
     except Exception as err:
         st.error(f"Execution Error: {str(err)}")
 
+# Calculate seconds remaining to next 3-minute candle boundary (+8 seconds latency offset)
 now = datetime.now(IST)
 seconds_past_interval = (now.minute % 3) * 60 + now.second
 wait_time = 180 - seconds_past_interval + 8
