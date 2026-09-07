@@ -32,11 +32,11 @@ IST = ZoneInfo("Asia/Kolkata")
 # ================================================================
 def get_headers(token):
     return {
-        "Accept": "application/json",
-        "Authorization": f"Bearer {token.strip()}",
-        "Cache-Control": "no-cache, no-store, must-revalidate",
-        "Pragma": "no-cache",
-    }
+        "Accept": "application/json",
+        "Authorization": f"Bearer {token.strip()}",
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+        "Pragma": "no-cache",
+    }
 
 
 def upstox_get(url, token, params=None):
