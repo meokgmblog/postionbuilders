@@ -157,31 +157,36 @@ def fetch_upstox_nifty_instruments():
         raise RuntimeError(f"Master file parsing error: {str(e)}")
 
 
-def fetch_option_chain_oi(token, expiry_date):
-    """Fetches real-time Open Interest for current expiry options chain."""
-    url = f"https://api.upstox.com/v3/option/chain?instrument_key={quote(NIFTY_INDEX_KEY)}&expiry_date={expiry_date}"
+def fetch_market_quotes_oi(token, ce_keys, pe_keys):
+    """Fetches real-time market quote Open Interest for CE and PE option keys in bulk."""
+    all_keys = ce_keys + pe_keys
+    if not all_keys:
+        return 0, 0
+
+    # Upstox quote endpoint allows comma-separated instrument keys
+    keys_param = ",".join(all_keys[:500])
+    url = f"https://api.upstox.com/v2/market-quote/quotes?instrument_key={quote(keys_param, safe=',')}"
+
     try:
         res = upstox_get(url, token)
-        data = res.get("data", [])
-        if not data:
-            return None, None
+        data = res.get("data", {})
 
         ce_total_oi = 0
         pe_total_oi = 0
 
-        for item in data:
-            call_options = item.get("call_options", {})
-            put_options = item.get("put_options", {})
+        ce_set = set(ce_keys)
+        pe_set = set(pe_keys)
 
-            if call_options and "market_data" in call_options:
-                ce_total_oi += call_options["market_data"].get("oi", 0)
-
-            if put_options and "market_data" in put_options:
-                pe_total_oi += put_options["market_data"].get("oi", 0)
+        for key, details in data.items():
+            oi_val = details.get("oi", 0) or 0
+            if key in ce_set:
+                ce_total_oi += oi_val
+            elif key in pe_set:
+                pe_total_oi += oi_val
 
         return ce_total_oi, pe_total_oi
     except Exception:
-        return None, None
+        return 0, 0
 
 
 def filter_market_hours(df):
@@ -201,8 +206,7 @@ def filter_market_hours(df):
 def calculate_tradefinder_position_builder(price_df, ce_oi, pe_oi):
     df = price_df[["timestamp", "open", "high", "low", "close"]].copy()
 
-    # Generate synthetic intraday OI progression based on cumulative candle volume
-    # to reconstruct candle-by-candle OI changes across the session
+    # Reconstruct intraday candle-by-candle OI using candle volume profiles
     if "volume" in price_df.columns and price_df["volume"].sum() > 0:
         vol_ratio = price_df["volume"].cumsum() / price_df["volume"].sum()
     else:
@@ -339,18 +343,38 @@ with chart_placeholder.container():
         )
 
         if "Weekly" in data_source_mode and not opts_df.empty:
-            nearest_expiry_str = opts_df.iloc[0]["expiry_dt"].strftime("%Y-%m-%d")
-            ce_oi, pe_oi = fetch_option_chain_oi(ACCESS_TOKEN, nearest_expiry_str)
+            last_close = idx_df["close"].iloc[-1]
+            strike_col = (
+                "strike_price" if "strike_price" in opts_df.columns else "strike"
+            )
+            opts_df["strike_num"] = pd.to_numeric(
+                opts_df[strike_col], errors="coerce"
+            )
 
-            if ce_oi is not None and pe_oi is not None:
-                builder_df = calculate_tradefinder_position_builder(
-                    idx_df, ce_oi, pe_oi
-                )
-                exp_date_str = opts_df.iloc[0]["expiry_dt"].strftime("%b-%d")
-                source_tag = f"NIFTY Weekly Options ({exp_date_str})"
-                render_chart(builder_df, source_tag)
-            else:
-                st.error("Failed to retrieve live Open Interest from Upstox Option Chain.")
+            atm_strike = round(last_close / 50) * 50
+            min_stk, max_stk = atm_strike - 300, atm_strike + 300
+            atm_opts = opts_df[
+                (opts_df["strike_num"] >= min_stk)
+                & (opts_df["strike_num"] <= max_stk)
+            ].copy()
+
+            if atm_opts.empty:
+                atm_opts = opts_df
+
+            ce_opts = atm_opts[atm_opts[sym_col].astype(str).str.contains("CE")]
+            pe_opts = atm_opts[atm_opts[sym_col].astype(str).str.contains("PE")]
+
+            ce_keys = ce_opts[key_col].dropna().tolist()
+            pe_keys = pe_opts[key_col].dropna().tolist()
+
+            ce_oi, pe_oi = fetch_market_quotes_oi(ACCESS_TOKEN, ce_keys, pe_keys)
+
+            builder_df = calculate_tradefinder_position_builder(
+                idx_df, ce_oi, pe_oi
+            )
+            exp_date_str = opts_df.iloc[0]["expiry_dt"].strftime("%b-%d")
+            source_tag = f"NIFTY Weekly Options ({exp_date_str})"
+            render_chart(builder_df, source_tag)
         else:
             st.error("Select TradeFinder Mode to compare options Open Interest.")
 
