@@ -18,17 +18,13 @@ import streamlit as st
 st.set_page_config(page_title="NIFTY 50 Position Builder", layout="wide")
 st.title("📈 NIFTY 50 - Live 3 Minute Position Builder")
 
-ACCESS_TOKEN = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiJIWjYwMzgiLCJqdGkiOiI2YTlhNTdlYmRmZmFlZTE4YjlhZWEwODEiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6dHJ1ZSwiaXNFeHRlbmRlZCI6dHJ1ZSwiaWF0IjoxNzg4NDk5OTQ3LCJpc3MiOiJ1ZGFwaS1nYXRld2F5LXNlcnZpY2UiLCJleHAiOjE4MjAwOTUyMDB9.u8MU3qcj4cMAr4xdjM5ogr7Z_pxdkc2h3VU3aQc2jHM"
+ACCESS_TOKEN = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2M0FZSEUiLCJqdGkiOiI2YTMwY2UxNTY4ODI0Zjc3ZDc1NmU3NjgiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlzRXh0ZW5kZWQiOnRydWUsImlhdCI6MTc4MTU4MzM4MSwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxODEzMTgzMjAwfQ.IoRDQhbhcn3w9Fkw75N3eBSamLcaA8GcAhVjf5K-iL8"
 
 NIFTY_INDEX_KEY = "NSE_INDEX|Nifty 50"
 INTERVAL = 3
 MARKET_START = "09:15"
 MARKET_END = "15:30"
 IST = ZoneInfo("Asia/Kolkata")
-
-# Initialize session state storage for tracked cumulative OI history
-if "oi_history" not in st.session_state:
-    st.session_state.oi_history = {}
 
 
 # ================================================================
@@ -85,7 +81,7 @@ def get_nifty_index_intraday(token):
     return df.sort_values("timestamp").reset_index(drop=True)
 
 
-@st.cache_data(ttl=1800)
+@st.cache_data(ttl=3600)
 def fetch_upstox_nifty_instruments():
     url = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.csv.gz"
 
@@ -161,34 +157,73 @@ def fetch_upstox_nifty_instruments():
         raise RuntimeError(f"Master file parsing error: {str(e)}")
 
 
-def get_live_option_oi(token, option_keys):
-    """Fetches real-time OI from Upstox Live Quotes API instead of empty candle OI."""
-    if not option_keys:
-        return 0, 0
+def get_derivative_intraday(token, instrument_key):
+    if not instrument_key:
+        return pd.DataFrame()
 
-    chunk_size = 50
-    keys_str = ",".join(option_keys[:chunk_size])
-    encoded_keys = quote(keys_str, safe="")
-    url = f"https://api.upstox.com/v3/market-quote/quotes?instrument_key={encoded_keys}"
+    encoded_key = quote(str(instrument_key), safe="")
+    cache_buster = int(time.time())
+    url = f"https://api.upstox.com/v3/historical-candle/intraday/{encoded_key}/minutes/{INTERVAL}?_={cache_buster}"
 
     try:
         res = upstox_get(url, token)
-        quote_data = res.get("data", {})
+        candles = res.get("data", {}).get("candles", [])
 
-        total_ce_oi = 0
-        total_pe_oi = 0
+        if not candles:
+            return pd.DataFrame()
 
-        for key, details in quote_data.items():
-            oi = details.get("oi", 0) or 0
-            symbol = details.get("symbol", "")
-            if symbol.endswith("CE") or "CE" in key:
-                total_ce_oi += oi
-            elif symbol.endswith("PE") or "PE" in key:
-                total_pe_oi += oi
+        df = pd.DataFrame(
+            candles,
+            columns=[
+                "timestamp",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "oi",
+            ],
+        )
 
-        return total_ce_oi, total_pe_oi
+        df["timestamp"] = (
+            pd.to_datetime(df["timestamp"])
+            .dt.tz_convert(IST)
+            .dt.tz_localize(None)
+        )
+        return df.sort_values("timestamp").reset_index(drop=True)
     except Exception:
-        return 0, 0
+        return pd.DataFrame()
+
+
+def fetch_option_data_parallel(token, option_rows, key_col):
+    keys = [row[key_col] for _, row in option_rows.iterrows()]
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        results = list(
+            executor.map(
+                lambda key: filter_market_hours(
+                    get_derivative_intraday(token, key)
+                ),
+                keys,
+            )
+        )
+
+    combined_df = None
+    for opt_data in results:
+        if not opt_data.empty:
+            opt_sub = opt_data[["timestamp", "oi"]].copy()
+            if combined_df is None:
+                combined_df = opt_sub.rename(columns={"oi": "sum_oi"})
+            else:
+                combined_df = pd.merge(
+                    combined_df, opt_sub, on="timestamp", how="outer"
+                )
+                combined_df["sum_oi"] = combined_df["sum_oi"].fillna(
+                    0
+                ) + combined_df["oi"].fillna(0)
+                combined_df.drop(columns=["oi"], inplace=True)
+
+    return combined_df
 
 
 def filter_market_hours(df):
@@ -205,49 +240,27 @@ def filter_market_hours(df):
 # ================================================================
 # POSITION BUILDER CALCULATION
 # ================================================================
-def calculate_tradefinder_position_builder(price_df, ce_keys, pe_keys, token):
-    df = price_df[["timestamp", "open", "high", "low", "close"]].copy()
+def calculate_tradefinder_position_builder(price_df, ce_df, pe_df):
+    clean_price = price_df[
+        ["timestamp", "open", "high", "low", "close"]
+    ].copy()
 
-    latest_time = df["timestamp"].iloc[-1]
-    live_ce_oi, live_pe_oi = get_live_option_oi(token, ce_keys + pe_keys)
+    opts_merged = pd.merge(ce_df, pe_df, on="timestamp", how="inner").sort_values(
+        "timestamp"
+    )
+    df = pd.merge(clean_price, opts_merged, on="timestamp", how="inner").sort_values(
+        "timestamp"
+    )
 
-    # Store latest OI in session state history mapped to current timestamp
-    st.session_state.oi_history[latest_time] = {
-        "ce_oi": live_ce_oi,
-        "pe_oi": live_pe_oi,
-    }
+    if df.empty:
+        raise RuntimeError("Timestamp alignment mismatch across market feeds.")
 
-    # Map tracked OI back onto index timestamps
-    ce_oi_list = []
-    pe_oi_list = []
-    for ts in df["timestamp"]:
-        if ts in st.session_state.oi_history:
-            ce_oi_list.append(st.session_state.oi_history[ts]["ce_oi"])
-            pe_oi_list.append(st.session_state.oi_history[ts]["pe_oi"])
-        else:
-            ce_oi_list.append(np.nan)
-            pe_oi_list.append(np.nan)
-
-    df["ce_oi"] = pd.Series(ce_oi_list).ffill().bfill().fillna(0)
-    df["pe_oi"] = pd.Series(pe_oi_list).ffill().bfill().fillna(0)
-
-    # Calculate OI differential changes
     df["ce_oi_diff"] = df["ce_oi"].diff(1).fillna(0)
     df["pe_oi_diff"] = df["pe_oi"].diff(1).fillna(0)
 
-    # Fallback simulation if market is closed or state is fresh to force visible bars
-    if (df["ce_oi_diff"] == 0).all() and (df["pe_oi_diff"] == 0).all():
-        np.random.seed(42)
-        price_diff = df["close"].diff(1).fillna(0)
-        df["net_oi_change"] = price_diff * 1500 + np.random.randint(
-            -500, 500, size=len(df)
-        )
-    else:
-        df["net_oi_change"] = df["pe_oi_diff"] - df["ce_oi_diff"]
+    df["net_oi_change"] = df["pe_oi_diff"] - df["ce_oi_diff"]
 
-    max_val = max(
-        abs(df["net_oi_change"].min()), abs(df["net_oi_change"].max()), 1
-    )
+    max_val = max(abs(df["net_oi_change"].min()), abs(df["net_oi_change"].max()), 1)
     df["position_builder_scaled"] = (df["net_oi_change"] / max_val) * 100
 
     return df
@@ -360,6 +373,7 @@ data_source_mode = st.radio(
     horizontal=True,
 )
 
+# Container for holding the live chart element
 chart_placeholder = st.empty()
 
 with chart_placeholder.container():
@@ -372,9 +386,7 @@ with chart_placeholder.container():
         if "Weekly" in data_source_mode and not opts_df.empty:
             last_close = idx_df["close"].iloc[-1]
             strike_col = (
-                "strike_price"
-                if "strike_price" in opts_df.columns
-                else "strike"
+                "strike_price" if "strike_price" in opts_df.columns else "strike"
             )
             opts_df["strike_num"] = pd.to_numeric(
                 opts_df[strike_col], errors="coerce"
@@ -390,34 +402,46 @@ with chart_placeholder.container():
             if atm_opts.empty:
                 atm_opts = opts_df
 
-            ce_opts = atm_opts[
-                atm_opts[sym_col].astype(str).str.endswith("CE")
-            ]
-            pe_opts = atm_opts[
-                atm_opts[sym_col].astype(str).str.endswith("PE")
-            ]
+            ce_opts = atm_opts[atm_opts[sym_col].astype(str).str.endswith("CE")]
+            pe_opts = atm_opts[atm_opts[sym_col].astype(str).str.endswith("PE")]
 
-            ce_keys = ce_opts[key_col].tolist()
-            pe_keys = pe_opts[key_col].tolist()
+            ce_df = fetch_option_data_parallel(ACCESS_TOKEN, ce_opts, key_col)
+            pe_df = fetch_option_data_parallel(ACCESS_TOKEN, pe_opts, key_col)
 
-            builder_df = calculate_tradefinder_position_builder(
-                idx_df, ce_keys, pe_keys, ACCESS_TOKEN
-            )
+            if ce_df is not None and pe_df is not None:
+                ce_df = (
+                    ce_df.rename(columns={"sum_oi": "ce_oi"})
+                    .sort_values("timestamp")
+                    .ffill()
+                    .dropna()
+                )
+                pe_df = (
+                    pe_df.rename(columns={"sum_oi": "pe_oi"})
+                    .sort_values("timestamp")
+                    .ffill()
+                    .dropna()
+                )
 
-            exp_date_str = opts_df.iloc[0]["expiry_dt"].strftime("%b-%d")
-            source_tag = f"NIFTY Weekly Options ({exp_date_str})"
-            render_chart(builder_df, source_tag)
+                builder_df = calculate_tradefinder_position_builder(
+                    idx_df, ce_df, pe_df
+                )
+                exp_date_str = opts_df.iloc[0]["expiry_dt"].strftime("%b-%d")
+                source_tag = f"NIFTY Weekly Options ({exp_date_str})"
+                render_chart(builder_df, source_tag)
+            else:
+                st.error("Failed to fetch option contracts.")
         else:
             st.error("Select TradeFinder Mode to compare options Open Interest.")
 
     except Exception as err:
         st.error(f"Execution Error: {str(err)}")
 
-# Calculate remaining time to next 3-minute boundary
+# Calculate seconds remaining to next 3-minute candle boundary (+8 seconds latency offset)
 now = datetime.now(IST)
 seconds_past_interval = (now.minute % 3) * 60 + now.second
 wait_time = 180 - seconds_past_interval + 8
 
+# Displays status and waits until the exact moment of candle closing
 status_info = st.info(f"⏳ Next candle sync in {wait_time} seconds...")
 time.sleep(wait_time)
 status_info.empty()
