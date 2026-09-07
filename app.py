@@ -25,6 +25,10 @@ MARKET_START = "09:15"
 MARKET_END = "15:30"
 IST = ZoneInfo("Asia/Kolkata")
 
+# Initialize session state for persistent OI history
+if "oi_history" not in st.session_state:
+    st.session_state["oi_history"] = {}
+
 
 # ================================================================
 # API HELPERS
@@ -131,12 +135,6 @@ def fetch_upstox_nifty_instruments():
             nifty_df["expiry_dt"].dt.date >= today.date()
         ].sort_values("expiry_dt")
 
-        futs = active_df[
-            active_df[type_col].astype(str).str.upper().str.contains("FUT")
-        ]
-        fut_key = futs.iloc[0][key_col] if not futs.empty else None
-        fut_sym = futs.iloc[0][sym_col] if not futs.empty else "NIFTY FUT"
-
         opts = active_df[
             active_df[type_col]
             .astype(str)
@@ -145,12 +143,12 @@ def fetch_upstox_nifty_instruments():
         ]
 
         if opts.empty:
-            return fut_key, fut_sym, pd.DataFrame(), key_col, sym_col, type_col
+            return pd.DataFrame(), key_col, sym_col, type_col
 
         nearest_expiry = opts.iloc[0]["expiry_dt"]
         matching_opts = opts[opts["expiry_dt"] == nearest_expiry].copy()
 
-        return fut_key, fut_sym, matching_opts, key_col, sym_col, type_col
+        return matching_opts, key_col, sym_col, type_col
 
     except Exception as e:
         raise RuntimeError(f"Master file parsing error: {str(e)}")
@@ -200,25 +198,33 @@ def filter_market_hours(df):
 # ================================================================
 # POSITION BUILDER CALCULATION
 # ================================================================
-def calculate_tradefinder_position_builder(price_df, ce_total_oi, pe_total_oi):
+def calculate_tradefinder_position_builder(price_df, ce_oi, pe_oi):
     df = price_df[["timestamp", "open", "high", "low", "close", "volume"]].copy()
 
-    # Calculate per-candle directional momentum using Price-Volume delta
+    # Save latest live snapshot into persistent state map
+    latest_ts = df["timestamp"].iloc[-1]
+    st.session_state["oi_history"][latest_ts] = (ce_oi, pe_oi)
+
+    # Synthetic fallback logic for historical candles before app launch
     df["body"] = df["close"] - df["open"]
     df["range"] = (df["high"] - df["low"]).replace(0, 1e-5)
     df["direction"] = np.sign(df["body"])
 
-    # Combine price movement and volume weight to model realistic net OI shifts per 3m bar
-    df["volume_weight"] = df["volume"] / (df["volume"].mean() + 1e-5)
-    df["raw_shift"] = df["direction"] * (abs(df["body"]) / df["range"]) * df["volume_weight"]
+    max_vol = df["volume"].max() if df["volume"].max() > 0 else 1
+    df["vol_ratio"] = df["volume"] / max_vol
 
-    # Scale shifts relative to live Options PCR (Put-Call Ratio) bias
-    total_oi = max(ce_total_oi + pe_total_oi, 1)
-    pcr_bias = (pe_total_oi - ce_total_oi) / total_oi
+    # Position Builder formula: combines candle momentum and volume
+    df["net_oi_change"] = df["direction"] * (abs(df["body"]) / df["range"]) * df["vol_ratio"] * 100
 
-    df["net_oi_change"] = df["raw_shift"] + (pcr_bias * 0.15)
+    # Overwrite candle snapshots where state exists
+    for idx, row in df.iterrows():
+        ts = row["timestamp"]
+        if ts in st.session_state["oi_history"]:
+            c_oi, p_oi = st.session_state["oi_history"][ts]
+            df.at[idx, "net_oi_change"] = (p_oi - c_oi) / 1000.0
 
-    max_val = max(abs(df["net_oi_change"].min()), abs(df["net_oi_change"].max()), 1e-5)
+    # Ensure min/max ranges don't collapse to 0
+    max_val = max(abs(df["net_oi_change"].min()), abs(df["net_oi_change"].max()), 1.0)
     df["position_builder_scaled"] = (df["net_oi_change"] / max_val) * 100
 
     return df
@@ -304,8 +310,9 @@ def render_chart(df, source_label):
     )
 
     fig.update_yaxes(gridcolor="#2a2e39", zerolinecolor="#363a45", row=1, col=1)
+    # Enable dynamic autorange on row 2 so histogram bars are visible
     fig.update_yaxes(
-        range=[-110, 110],
+        autorange=True,
         gridcolor="#2a2e39",
         zerolinecolor="#363a45",
         row=2,
@@ -336,9 +343,7 @@ chart_placeholder = st.empty()
 with chart_placeholder.container():
     try:
         idx_df = filter_market_hours(get_nifty_index_intraday(ACCESS_TOKEN))
-        fut_key, fut_sym, opts_df, key_col, sym_col, type_col = (
-            fetch_upstox_nifty_instruments()
-        )
+        opts_df, key_col, sym_col, type_col = fetch_upstox_nifty_instruments()
 
         if "Weekly" in data_source_mode and not opts_df.empty:
             last_close = idx_df["close"].iloc[-1]
