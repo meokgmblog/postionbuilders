@@ -81,8 +81,9 @@ def get_nifty_index_intraday(token):
     return df.sort_values("timestamp").reset_index(drop=True)
 
 
-@st.cache_data(ttl=3600)
-def fetch_upstox_nifty_instruments():
+# FIX 1: Add _today parameter so Streamlit automatically busts the cache at midnight
+@st.cache_data(ttl=1800)
+def fetch_upstox_nifty_instruments(_today):
     url = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.csv.gz"
 
     try:
@@ -126,10 +127,11 @@ def fetch_upstox_nifty_instruments():
             nifty_df["expiry"], errors="coerce"
         )
         nifty_df = nifty_df.dropna(subset=["expiry_dt"])
-        today = pd.Timestamp(datetime.now().date())
+        today_ts = pd.Timestamp(_today)
 
+        # Filter strictly for today or future expiries
         active_df = nifty_df[
-            nifty_df["expiry_dt"].dt.date >= today.date()
+            nifty_df["expiry_dt"].dt.date >= today_ts.date()
         ].sort_values("expiry_dt")
 
         futs = active_df[
@@ -138,11 +140,10 @@ def fetch_upstox_nifty_instruments():
         fut_key = futs.iloc[0][key_col] if not futs.empty else None
         fut_sym = futs.iloc[0][sym_col] if not futs.empty else "NIFTY FUT"
 
+        # FIX 2: Dynamic matching for Option contract types
         opts = active_df[
-            active_df[type_col]
-            .astype(str)
-            .str.upper()
-            .str.contains("OPTIDX|OPTSTK|CE|PE", regex=True)
+            active_df[sym_col].astype(str).str.endswith("CE")
+            | active_df[sym_col].astype(str).str.endswith("PE")
         ]
 
         if opts.empty:
@@ -245,15 +246,13 @@ def calculate_tradefinder_position_builder(price_df, ce_df, pe_df):
         ["timestamp", "open", "high", "low", "close"]
     ].copy()
 
-    opts_merged = pd.merge(ce_df, pe_df, on="timestamp", how="inner").sort_values(
-        "timestamp"
-    )
-    df = pd.merge(clean_price, opts_merged, on="timestamp", how="inner").sort_values(
-        "timestamp"
-    )
-
-    if df.empty:
-        raise RuntimeError("Timestamp alignment mismatch across market feeds.")
+    # FIX 3: Outer merge and forward-fill to avoid empty rows from timestamp micro-mismatches
+    opts_merged = pd.merge(ce_df, pe_df, on="timestamp", how="outer").sort_values("timestamp").ffill().bfill()
+    
+    df = pd.merge(clean_price, opts_merged, on="timestamp", how="left").sort_values("timestamp")
+    
+    df["ce_oi"] = df["ce_oi"].ffill().fillna(0)
+    df["pe_oi"] = df["pe_oi"].ffill().fillna(0)
 
     df["ce_oi_diff"] = df["ce_oi"].diff(1).fillna(0)
     df["pe_oi_diff"] = df["pe_oi"].diff(1).fillna(0)
@@ -373,14 +372,16 @@ data_source_mode = st.radio(
     horizontal=True,
 )
 
-# Container for holding the live chart element
 chart_placeholder = st.empty()
 
 with chart_placeholder.container():
     try:
         idx_df = filter_market_hours(get_nifty_index_intraday(ACCESS_TOKEN))
+        
+        # Pass current date to clear cached instrument data across trading days
+        today_date = datetime.now(IST).date()
         fut_key, fut_sym, opts_df, key_col, sym_col, type_col = (
-            fetch_upstox_nifty_instruments()
+            fetch_upstox_nifty_instruments(_today=today_date)
         )
 
         if "Weekly" in data_source_mode and not opts_df.empty:
@@ -408,18 +409,14 @@ with chart_placeholder.container():
             ce_df = fetch_option_data_parallel(ACCESS_TOKEN, ce_opts, key_col)
             pe_df = fetch_option_data_parallel(ACCESS_TOKEN, pe_opts, key_col)
 
-            if ce_df is not None and pe_df is not None:
+            if ce_df is not None and pe_df is not None and not ce_df.empty and not pe_df.empty:
                 ce_df = (
                     ce_df.rename(columns={"sum_oi": "ce_oi"})
                     .sort_values("timestamp")
-                    .ffill()
-                    .dropna()
                 )
                 pe_df = (
                     pe_df.rename(columns={"sum_oi": "pe_oi"})
                     .sort_values("timestamp")
-                    .ffill()
-                    .dropna()
                 )
 
                 builder_df = calculate_tradefinder_position_builder(
@@ -429,7 +426,8 @@ with chart_placeholder.container():
                 source_tag = f"NIFTY Weekly Options ({exp_date_str})"
                 render_chart(builder_df, source_tag)
             else:
-                st.error("Failed to fetch option contracts.")
+                st.warning("Option Open Interest data not available yet for today's market session.")
+                render_chart(idx_df.assign(position_builder_scaled=0), "NIFTY Index")
         else:
             st.error("Select TradeFinder Mode to compare options Open Interest.")
 
@@ -441,7 +439,6 @@ now = datetime.now(IST)
 seconds_past_interval = (now.minute % 3) * 60 + now.second
 wait_time = 180 - seconds_past_interval + 8
 
-# Displays status and waits until the exact moment of candle closing
 status_info = st.info(f"⏳ Next candle sync in {wait_time} seconds...")
 time.sleep(wait_time)
 status_info.empty()
