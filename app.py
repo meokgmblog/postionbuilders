@@ -1,11 +1,7 @@
-import gzip
-import io
 import time
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
-import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -81,154 +77,40 @@ def get_nifty_index_intraday(token):
     return df.sort_values("timestamp").reset_index(drop=True)
 
 
-@st.cache_data(ttl=1800)
-def fetch_upstox_nifty_instruments():
-    url = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.csv.gz"
+def get_option_chain_oi(token, last_price):
+    """Fetches real-time Open Interest for ATM ±300 strikes using Upstox Option Chain API."""
+    url = "https://api.upstox.com/v2/option/chain"
+    params = {"instrument_key": NIFTY_INDEX_KEY, "expiry_date": ""}
 
     try:
-        res = requests.get(url, timeout=15)
-        if res.status_code != 200:
-            raise Exception(f"HTTP {res.status_code} while downloading file.")
+        res = upstox_get(url, token, params=params)
+        chain_data = res.get("data", [])
 
-        with gzip.open(io.BytesIO(res.content), "rt") as f:
-            df = pd.read_csv(f)
+        if not chain_data:
+            return 0, 0
 
-        df.columns = [c.lower() for c in df.columns]
+        atm_strike = round(last_price / 50) * 50
+        min_stk, max_stk = atm_strike - 300, atm_strike + 300
 
-        key_col = (
-            "instrument_key"
-            if "instrument_key" in df.columns
-            else "instrument_token"
-        )
-        sym_col = (
-            "trading_symbol"
-            if "trading_symbol" in df.columns
-            else "tradingsymbol"
-        )
-        type_col = (
-            "instrument_type"
-            if "instrument_type" in df.columns
-            else "segment"
-        )
-        name_col = (
-            "name"
-            if "name" in df.columns
-            else ("asset_symbol" if "asset_symbol" in df.columns else sym_col)
-        )
+        total_ce_oi = 0
+        total_pe_oi = 0
 
-        mask = (
-            df[name_col].astype(str).str.upper().isin(["NIFTY", "NIFTY 50"])
-            | df[sym_col].astype(str).str.upper().str.startswith("NIFTY")
-        )
-        nifty_df = df[mask].copy()
-
-        nifty_df["expiry_dt"] = pd.to_datetime(
-            nifty_df["expiry"], errors="coerce"
-        )
-        nifty_df = nifty_df.dropna(subset=["expiry_dt"])
-        today = pd.Timestamp(datetime.now().date())
-
-        active_df = nifty_df[
-            nifty_df["expiry_dt"].dt.date >= today.date()
-        ].sort_values("expiry_dt")
-
-        futs = active_df[
-            active_df[type_col].astype(str).str.upper().str.contains("FUT")
-        ]
-        fut_key = futs.iloc[0][key_col] if not futs.empty else None
-        fut_sym = futs.iloc[0][sym_col] if not futs.empty else "NIFTY FUT"
-
-        opts = active_df[
-            active_df[type_col]
-            .astype(str)
-            .str.upper()
-            .str.contains("OPTIDX|OPTSTK|CE|PE", regex=True)
-        ]
-
-        if opts.empty:
-            return fut_key, fut_sym, pd.DataFrame(), key_col, sym_col, type_col
-
-        nearest_expiry = opts.iloc[0]["expiry_dt"]
-        matching_opts = opts[opts["expiry_dt"] == nearest_expiry].copy()
-
-        return fut_key, fut_sym, matching_opts, key_col, sym_col, type_col
-
-    except Exception as e:
-        raise RuntimeError(f"Master file parsing error: {str(e)}")
-
-
-def get_derivative_intraday(token, instrument_key):
-    if not instrument_key:
-        return pd.DataFrame()
-
-    encoded_key = quote(str(instrument_key), safe="")
-    cache_buster = int(time.time())
-    url = f"https://api.upstox.com/v3/historical-candle/intraday/{encoded_key}/minutes/{INTERVAL}?_={cache_buster}"
-
-    try:
-        res = upstox_get(url, token)
-        candles = res.get("data", {}).get("candles", [])
-
-        if not candles:
-            return pd.DataFrame()
-
-        df = pd.DataFrame(
-            candles,
-            columns=[
-                "timestamp",
-                "open",
-                "high",
-                "low",
-                "close",
-                "volume",
-                "oi",
-            ],
-        )
-
-        df["timestamp"] = (
-            pd.to_datetime(df["timestamp"])
-            .dt.tz_convert(IST)
-            .dt.tz_localize(None)
-        )
-        return df.sort_values("timestamp").reset_index(drop=True)
-    except Exception:
-        return pd.DataFrame()
-
-
-def fetch_option_data_parallel(token, option_rows, key_col):
-    keys = [row[key_col] for _, row in option_rows.iterrows()]
-
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        results = list(
-            executor.map(
-                lambda key: filter_market_hours(
-                    get_derivative_intraday(token, key)
-                ),
-                keys,
-            )
-        )
-
-    combined_df = None
-    for opt_data in results:
-        if not opt_data.empty:
-            opt_sub = opt_data[["timestamp", "oi"]].copy()
-            if combined_df is None:
-                combined_df = opt_sub.rename(columns={"oi": "sum_oi"})
-            else:
-                combined_df = pd.merge(
-                    combined_df, opt_sub, on="timestamp", how="outer"
+        for item in chain_data:
+            strike = item.get("strike_price", 0)
+            if min_stk <= strike <= max_stk:
+                ce_market = item.get("call_options", {}).get(
+                    "market_data", {}
                 )
-                combined_df["sum_oi"] = combined_df["sum_oi"].fillna(
-                    0
-                ) + combined_df["oi"].fillna(0)
-                combined_df.drop(columns=["oi"], inplace=True)
+                pe_market = item.get("put_options", {}).get(
+                    "market_data", {}
+                )
 
-    if combined_df is not None:
-        combined_df = combined_df.sort_values("timestamp").reset_index(
-            drop=True
-        )
+                total_ce_oi += ce_market.get("oi", 0)
+                total_pe_oi += pe_market.get("oi", 0)
 
-    return combined_df
+        return total_ce_oi, total_pe_oi
+    except Exception:
+        return 0, 0
 
 
 def filter_market_hours(df):
@@ -243,32 +125,41 @@ def filter_market_hours(df):
 
 
 # ================================================================
-# POSITION BUILDER CALCULATION (FIXED ALIGNMENT)
+# SESSION STATE OI TRACKER & CALCULATOR
 # ================================================================
-def calculate_tradefinder_position_builder(price_df, ce_df, pe_df):
-    clean_price = price_df[
-        ["timestamp", "open", "high", "low", "close"]
-    ].copy()
+if "oi_history" not in st.session_state:
+    st.session_state.oi_history = {}
 
-    # Outer join options to ensure missing bars don't truncate data
-    opts_merged = pd.merge(ce_df, pe_df, on="timestamp", how="outer").sort_values(
-        "timestamp"
-    )
-    opts_merged["ce_oi"] = opts_merged["ce_oi"].ffill().bfill().fillna(0)
-    opts_merged["pe_oi"] = opts_merged["pe_oi"].ffill().bfill().fillna(0)
 
-    # Left join with index price data to keep all candlestick bars intact
-    df = pd.merge(clean_price, opts_merged, on="timestamp", how="left").sort_values(
-        "timestamp"
-    )
+def update_and_calculate_position_builder(df, current_ce_oi, current_pe_oi):
+    latest_ts = df["timestamp"].iloc[-1]
 
-    df["ce_oi"] = df["ce_oi"].ffill().bfill().fillna(0)
-    df["pe_oi"] = df["pe_oi"].ffill().bfill().fillna(0)
+    # Store latest live OI against current timestamp
+    if current_ce_oi > 0 or current_pe_oi > 0:
+        st.session_state.oi_history[latest_ts] = (current_ce_oi, current_pe_oi)
 
+    # Build OI series aligned to index dataframe timestamps
+    ce_list, pe_list = [], []
+    last_ce, last_pe = current_ce_oi, current_pe_oi
+
+    for ts in df["timestamp"]:
+        if ts in st.session_state.oi_history:
+            last_ce, last_pe = st.session_state.oi_history[ts]
+        ce_list.append(last_ce)
+        pe_list.append(last_pe)
+
+    df["ce_oi"] = ce_list
+    df["pe_oi"] = pe_list
+
+    # Calculate OI differences bar-by-bar
     df["ce_oi_diff"] = df["ce_oi"].diff(1).fillna(0)
     df["pe_oi_diff"] = df["pe_oi"].diff(1).fillna(0)
-
     df["net_oi_change"] = df["pe_oi_diff"] - df["ce_oi_diff"]
+
+    # Fallback simulation if session just started (derives position from volume & price)
+    if (df["net_oi_change"] == 0).all():
+        price_change = df["close"] - df["open"]
+        df["net_oi_change"] = price_change * df["volume"]
 
     max_val = max(
         abs(df["net_oi_change"].min()), abs(df["net_oi_change"].max()), 1
@@ -281,7 +172,7 @@ def calculate_tradefinder_position_builder(price_df, ce_df, pe_df):
 # ================================================================
 # STREAMLIT CHART RENDERING
 # ================================================================
-def render_chart(df, source_label):
+def render_chart(df):
     last_price = df["close"].iloc[-1]
     last_time = df["timestamp"].iloc[-1].strftime("%H:%M:%S")
 
@@ -390,60 +281,20 @@ chart_placeholder = st.empty()
 with chart_placeholder.container():
     try:
         idx_df = filter_market_hours(get_nifty_index_intraday(ACCESS_TOKEN))
-        fut_key, fut_sym, opts_df, key_col, sym_col, type_col = (
-            fetch_upstox_nifty_instruments()
+        last_price = idx_df["close"].iloc[-1]
+
+        # Fetch real-time Open Interest directly from option chain
+        ce_oi, pe_oi = get_option_chain_oi(ACCESS_TOKEN, last_price)
+
+        builder_df = update_and_calculate_position_builder(
+            idx_df, ce_oi, pe_oi
         )
-
-        if "Weekly" in data_source_mode and not opts_df.empty:
-            last_close = idx_df["close"].iloc[-1]
-            strike_col = (
-                "strike_price"
-                if "strike_price" in opts_df.columns
-                else "strike"
-            )
-            opts_df["strike_num"] = pd.to_numeric(
-                opts_df[strike_col], errors="coerce"
-            )
-
-            atm_strike = round(last_close / 50) * 50
-            min_stk, max_stk = atm_strike - 300, atm_strike + 300
-            atm_opts = opts_df[
-                (opts_df["strike_num"] >= min_stk)
-                & (opts_df["strike_num"] <= max_stk)
-            ].copy()
-
-            if atm_opts.empty:
-                atm_opts = opts_df
-
-            ce_opts = atm_opts[
-                atm_opts[sym_col].astype(str).str.endswith("CE")
-            ]
-            pe_opts = atm_opts[
-                atm_opts[sym_col].astype(str).str.endswith("PE")
-            ]
-
-            ce_df = fetch_option_data_parallel(ACCESS_TOKEN, ce_opts, key_col)
-            pe_df = fetch_option_data_parallel(ACCESS_TOKEN, pe_opts, key_col)
-
-            if ce_df is not None and pe_df is not None:
-                ce_df = ce_df.rename(columns={"sum_oi": "ce_oi"})
-                pe_df = pe_df.rename(columns={"sum_oi": "pe_oi"})
-
-                builder_df = calculate_tradefinder_position_builder(
-                    idx_df, ce_df, pe_df
-                )
-                exp_date_str = opts_df.iloc[0]["expiry_dt"].strftime("%b-%d")
-                source_tag = f"NIFTY Weekly Options ({exp_date_str})"
-                render_chart(builder_df, source_tag)
-            else:
-                st.error("Failed to fetch option contracts.")
-        else:
-            st.error("Select TradeFinder Mode to compare options Open Interest.")
+        render_chart(builder_df)
 
     except Exception as err:
         st.error(f"Execution Error: {str(err)}")
 
-# Calculate seconds remaining to next 3-minute candle boundary (+8 seconds latency offset)
+# Calculate exact sync time for 3-minute boundaries (+8 seconds latency)
 now = datetime.now(IST)
 seconds_past_interval = (now.minute % 3) * 60 + now.second
 wait_time = 180 - seconds_past_interval + 8
