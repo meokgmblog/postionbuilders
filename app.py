@@ -245,15 +245,19 @@ def calculate_tradefinder_position_builder(price_df, ce_df, pe_df):
         ["timestamp", "open", "high", "low", "close"]
     ].copy()
 
-    opts_merged = pd.merge(ce_df, pe_df, on="timestamp", how="inner").sort_values(
+    # Outer join prevents missing timestamps from dropping candles
+    opts_merged = pd.merge(ce_df, pe_df, on="timestamp", how="outer").sort_values(
         "timestamp"
     )
-    df = pd.merge(clean_price, opts_merged, on="timestamp", how="inner").sort_values(
+    df = pd.merge(clean_price, opts_merged, on="timestamp", how="left").sort_values(
         "timestamp"
     )
 
     if df.empty:
         raise RuntimeError("Timestamp alignment mismatch across market feeds.")
+
+    df["ce_oi"] = df["ce_oi"].ffill().fillna(0)
+    df["pe_oi"] = df["pe_oi"].ffill().fillna(0)
 
     df["ce_oi_diff"] = df["ce_oi"].diff(1).fillna(0)
     df["pe_oi_diff"] = df["pe_oi"].diff(1).fillna(0)
@@ -402,8 +406,18 @@ with chart_placeholder.container():
             if atm_opts.empty:
                 atm_opts = opts_df
 
-            ce_opts = atm_opts[atm_opts[sym_col].astype(str).str.endswith("CE")]
-            pe_opts = atm_opts[atm_opts[sym_col].astype(str).str.endswith("PE")]
+            ce_opts = atm_opts[
+                atm_opts[sym_col]
+                .astype(str)
+                .str.upper()
+                .str.contains(r"CE$|CE\.", regex=True)
+            ]
+            pe_opts = atm_opts[
+                atm_opts[sym_col]
+                .astype(str)
+                .str.upper()
+                .str.contains(r"PE$|PE\.", regex=True)
+            ]
 
             ce_df = fetch_option_data_parallel(ACCESS_TOKEN, ce_opts, key_col)
             pe_df = fetch_option_data_parallel(ACCESS_TOKEN, pe_opts, key_col)
